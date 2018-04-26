@@ -23,7 +23,8 @@ def looper(txnPoolNodesLooper):
 
 def changeNodeHa(looper, txnPoolNodeSet, tdirWithClientPoolTxns,
                  tconf, shouldBePrimary, tdir,
-                 sdk_pool_handle, sdk_wallet_stewards):
+                 sdk_pool_handle, sdk_wallet_stewards,
+                 sdk_wallet_client):
     # prepare new ha for node and client stack
     subjectedNode = None
     node_index = None
@@ -61,7 +62,7 @@ def changeNodeHa(looper, txnPoolNodeSet, tdirWithClientPoolTxns,
     looper.add(restartedNode)
     txnPoolNodeSet[nodeIndex] = restartedNode
     looper.run(checkNodesConnected(txnPoolNodeSet, customTimeout=70))
-    sdk_pool_refresh(looper, sdk_pool_handle)
+
 
     electionTimeout = waits.expectedPoolElectionTimeout(
         nodeCount=len(txnPoolNodeSet),
@@ -71,12 +72,8 @@ def changeNodeHa(looper, txnPoolNodeSet, tdirWithClientPoolTxns,
                         retryWait=1,
                         customTimeout=electionTimeout)
 
-    # start client and check the node HA
-    anotherClient, _ = genTestClient(tmpdir=tdirWithClientPoolTxns,
-                                     usePoolLedger=True)
-    looper.add(anotherClient)
-    looper.run(eventually(anotherClient.ensureConnectedToNodes))
+    sdk_pool_refresh(looper, sdk_pool_handle)
     sdk_send_random_and_check(looper, txnPoolNodeSet,
                               sdk_pool_handle,
-                              sdk_wallet_steward,
+                              sdk_wallet_client,
                               8)

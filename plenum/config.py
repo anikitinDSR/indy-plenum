@@ -30,9 +30,12 @@ poolTransactionsFile = pool_transactions_file_base
 domainTransactionsFile = domain_transactions_file_base
 configTransactionsFile = config_transactions_file_base
 
+stateTsStorage = KeyValueStorageType.Rocksdb
+
 poolStateDbName = 'pool_state'
 domainStateDbName = 'domain_state'
 configStateDbName = 'config_state'
+stateTsDbName = "state_ts_db"
 
 stateSignatureDbName = 'state_signature'
 
@@ -43,19 +46,19 @@ seqNoDbName = 'seq_no_db'
 clientBootStrategy = ClientBootStrategy.PoolTxn
 
 hashStore = {
-    "type": HS_LEVELDB
+    "type": HS_ROCKSDB
 }
 
 primaryStorage = None
 
-domainStateStorage = KeyValueStorageType.Leveldb
-poolStateStorage = KeyValueStorageType.Leveldb
-configStateStorage = KeyValueStorageType.Leveldb
-reqIdToTxnStorage = KeyValueStorageType.Leveldb
+domainStateStorage = KeyValueStorageType.Rocksdb
+poolStateStorage = KeyValueStorageType.Rocksdb
+configStateStorage = KeyValueStorageType.Rocksdb
+reqIdToTxnStorage = KeyValueStorageType.Rocksdb
 
-stateSignatureStorage = KeyValueStorageType.Leveldb
+stateSignatureStorage = KeyValueStorageType.Rocksdb
 
-transactionLogDefaultStorage = KeyValueStorageType.Leveldb
+transactionLogDefaultStorage = KeyValueStorageType.Rocksdb
 
 DefaultPluginPath = {
     # PLUGIN_BASE_DIR_PATH: "<abs path of plugin directory can be given here,
@@ -134,11 +137,9 @@ ConsistencyProofsTimeout = 5
 CatchupTransactionsTimeout = 6
 
 # Log configuration
-logRotationWhen = 'W6'
-logRotationInterval = 1
-logRotationBackupCount = 50
+logRotationBackupCount = 300
 logRotationMaxBytes = 100 * 1024 * 1024
-logRotationCompress = True
+logRotationCompression = "xz"
 logFormat = '{asctime:s} | {levelname:8s} | {filename:20s} ({lineno: >4}) | {funcName:s} | {message:s}'
 logFormatStyle = '{'
 logLevel = logging.NOTSET

@@ -88,7 +88,8 @@ from plenum.server.validator_info_tool import ValidatorNodeInfoTool
 from plenum.common.config_helper import PNodeConfigHelper
 from state.pruning_state import PruningState
 from state.state import State
-from storage.helper import initKeyValueStorage, initHashStore
+from storage.helper import initKeyValueStorage, initHashStore, initKeyValueStorageIntKeys
+from storage.state_ts_store import StateTsDbStorage
 from stp_core.common.log import getlogger
 from stp_core.crypto.signer import Signer
 from stp_core.network.exceptions import RemoteNotFound
@@ -174,6 +175,10 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
         self.states = {}  # type: Dict[int, State]
 
         self.primaryStorage = storage or self.getPrimaryStorage()
+
+        # This is storage for storing map: timestamp/state.headHash
+        # Now it used in domainLedger
+        self.stateTsDbStorage = None
 
         self.register_state(DOMAIN_LEDGER_ID, self.loadDomainState())
 
@@ -583,7 +588,18 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
                                     self.states[DOMAIN_LEDGER_ID],
                                     self.config,
                                     self.reqProcessors,
-                                    self.bls_bft.bls_store)
+                                    self.bls_bft.bls_store,
+                                    self.getStateTsDbStorage())
+
+    def getStateTsDbStorage(self):
+        if self.stateTsDbStorage is None:
+            self.stateTsDbStorage = StateTsDbStorage(
+                self.name,
+                initKeyValueStorageIntKeys(self.config.stateTsStorage,
+                                           self.dataLocation,
+                                           self.config.stateTsDbName)
+            )
+        return self.stateTsDbStorage
 
     def loadSeqNoDB(self):
         return ReqIdrToTxn(
@@ -844,6 +860,7 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
                            seconds=self._view_change_timeout)
 
             self.schedule_node_status_dump()
+            self.dump_additional_info()
 
             # if first time running this node
             if not self.nodestack.remotes:
@@ -860,12 +877,15 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
 
     def schedule_node_status_dump(self):
         # one-shot dump right after start
-        self._schedule(action=self._info_tool.dump_json_file,
+        self._schedule(action=self._info_tool.dump_general_info,
                        seconds=self.config.DUMP_VALIDATOR_INFO_INIT_SEC)
         self.startRepeating(
-            self._info_tool.dump_json_file,
+            self._info_tool.dump_general_info,
             seconds=self.config.DUMP_VALIDATOR_INFO_PERIOD_SEC,
         )
+
+    def dump_additional_info(self):
+        self._info_tool.dump_additional_info()
 
     @property
     def rank(self) -> Optional[int]:
@@ -941,6 +961,8 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
             self.seqNoDB.close()
         if self.bls_bft.bls_store:
             self.bls_bft.bls_store.close()
+        if self.stateTsDbStorage:
+            self.stateTsDbStorage.close()
 
     def reset(self):
         logger.info("{} reseting...".format(self), extra={"cli": False})
@@ -1772,6 +1794,9 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
             rh.updateState([txn], isCommitted=True)
             state = self.getState(ledger_id)
             state.commit(rootHash=state.headHash)
+            if ledger_id == DOMAIN_LEDGER_ID and rh.ts_store:
+                rh.ts_store.set(txn[TXN_TIME],
+                                state.headHash)
         self.updateSeqNoMap([txn])
         self._clear_req_key_for_txn(ledger_id, txn)
 

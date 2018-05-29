@@ -6,11 +6,22 @@ import pip
 import os
 import base58
 import subprocess
+import locale
+import codecs
 from dateutil import parser
+import datetime
 
 from ledger.genesis_txn.genesis_txn_file_util import genesis_txn_path
 from stp_core.common.constants import ZMQ_NETWORK_PROTOCOL
 from stp_core.common.log import getlogger
+
+
+def decode_err_handler(error):
+    length = error.end - error.start
+    return length * ' ', error.end
+
+
+codecs.register_error('decode_errors', decode_err_handler)
 
 logger = getlogger()
 
@@ -345,15 +356,20 @@ class ValidatorNodeInfoTool:
             stashed_txns["Stashed_checkoints"] = self._prepare_for_json(len(replica.stashedRecvdCheckpoints))
             if replica.prePreparesPendingPrevPP:
                 stashed_txns["Min_stashed_PrePrepare"] = self._prepare_for_json(
-                    replica.prePreparesPendingPrevPP.itervalues[-1])
+                    [pp for pp in replica.prePreparesPendingPrevPP.itervalues()][-1])
             replica_stat["Stashed_txns"] = stashed_txns
             res[replica.name] = self._prepare_for_json(replica_stat)
         return res
 
     def _get_node_metrics(self):
         metrics = {}
-        for metrica in self._node.monitor.metrics():
-            metrics[metrica[0]] = metrica[1]
+        for metrica in self._node.monitor.metrics()[1:]:
+            if metrica[0] == 'master request latencies':
+                latencies = list(metrica[1].values())
+                metrics['max master request latencies'] = self._prepare_for_json(
+                    max(latencies) if latencies else 0)
+            else:
+                metrics[metrica[0]] = self._prepare_for_json(metrica[1])
         metrics.update(
             {
                 'average-per-second': {
@@ -376,6 +392,10 @@ class ValidatorNodeInfoTool:
             ics["Message"] = self._prepare_for_json(queue.msg)
             ic_queue[view_no] = self._prepare_for_json(ics)
         return ic_queue
+
+    def __get_start_vc_ts(self):
+        ts = self._node.view_changer.start_view_change_ts
+        return str(datetime.datetime.utcfromtimestamp(ts))
 
     @property
     @none_on_fail
@@ -429,6 +449,10 @@ class ValidatorNodeInfoTool:
                         self._node.viewNo),
                     "VC_in_progress": self._prepare_for_json(
                         self._node.view_changer.view_change_in_progress),
+                    "Last_view_change_started_at": self._prepare_for_json(
+                        self.__get_start_vc_ts()),
+                    "Last_complete_view_no": self._prepare_for_json(
+                        self._node.view_changer.last_completed_view_no),
                     "IC_queue": self._prepare_for_json(
                         self._get_ic_queue()),
                     "VCDone_queue": self._prepare_for_json(
@@ -490,11 +514,10 @@ class ValidatorNodeInfoTool:
     def _run_external_cmd(self, cmd):
         ret = subprocess.run(cmd,
                              shell=True,
-                             universal_newlines=True,
                              stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE,
                              timeout=5)
-        return ret.stdout
+        return ret.stdout.decode(locale.getpreferredencoding(), 'decode_errors')
 
     def _get_journalctl_exceptions(self):
         output = self._run_external_cmd("journalctl | sed -n '/Traceback/,/Error/p'")
@@ -514,8 +537,9 @@ class ValidatorNodeInfoTool:
             path_to_upgrade_log = os.path.join(os.path.join(self._node.ledger_dir,
                                                             self._node.config.upgradeLogFile))
             if os.path.exists(path_to_upgrade_log):
-                output = self._run_external_cmd(path_to_upgrade_log)
-        return output.split(os.linesep)
+                with open(path_to_upgrade_log, 'r') as upgrade_log:
+                    output = upgrade_log.readlines()
+        return output
 
     def _get_last_n_from_pool_ledger(self):
         i = 0

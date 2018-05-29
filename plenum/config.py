@@ -73,6 +73,7 @@ stewardThreshold = 20
 # Monitoring configuration
 PerfCheckFreq = 10
 UnorderedCheckFreq = 60
+ForceViewChangeFreq = 0
 
 # Temporarily reducing DELTA till the calculations for extra work are not
 # incorporated
@@ -87,19 +88,19 @@ LatencyWindowSize = 30
 LatencyGraphDuration = 240
 notifierEventTriggeringConfig = {
     'clusterThroughputSpike': {
-        'borders_coeff': 10,
+        'bounds_coeff': 10,
         'min_cnt': 15,
         'freq': 60,
         'min_activity_threshold': 10,
-        'use_weighted_borders_coeff': True,
+        'use_weighted_bounds_coeff': True,
         'enabled': True
     },
     'nodeRequestSpike': {
-        'borders_coeff': 10,
+        'bounds_coeff': 10,
         'min_cnt': 15,
         'freq': 60,
         'min_activity_threshold': 10,
-        'use_weighted_borders_coeff': True,
+        'use_weighted_bounds_coeff': True,
         'enabled': True
     }
 }

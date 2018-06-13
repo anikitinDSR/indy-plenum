@@ -1,5 +1,7 @@
 import time
 
+import pytest
+
 from plenum.common.config_util import getConfigOnce
 
 from plenum.common.config_helper import PNodeConfigHelper

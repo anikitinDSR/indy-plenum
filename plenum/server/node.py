@@ -119,7 +119,7 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
 
     suspicions = {s.code: s.reason for s in Suspicions.get_list()}
     keygenScript = "init_plenum_keys"
-    _client_request_class = SafeRequest
+    client_request_class = SafeRequest
     _info_tool_class = ValidatorNodeInfoTool
     # The order of ledger id in the following list determines the order in
     # which those ledgers will be synced. Think carefully before changing the
@@ -568,6 +568,7 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
         logger.info('{}{} changed to view {}, will start catchup now'.
                     format(VIEW_CHANGE_PREFIX, self, self.viewNo))
 
+        self._cancel(self._check_view_change_completed)
         self._schedule(action=self._check_view_change_completed,
                        seconds=self._view_change_timeout)
 
@@ -1196,8 +1197,8 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
             self.send_current_state_to_lagging_node(node)
             self.send_ledger_status_to_newly_connected_node(node)
 
-    def request_ledger_status_from_nodes(self, ledger_id):
-        for node_name in self.nodeReg:
+    def request_ledger_status_from_nodes(self, ledger_id, nodes=None):
+        for node_name in nodes if nodes else self.nodeReg:
             if node_name == self.name:
                 continue
             try:
@@ -1236,13 +1237,6 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
         logger.display("{} node left by txn {}".format(self, txn_data))
         self.setPoolParams()
         self.adjustReplicas()
-
-    def sendPoolInfoToClients(self, txn):
-        logger.debug("{} sending new node info {} to all clients".
-                     format(self, txn))
-        msg = PoolLedgerTxns(txn)
-        self.clientstack.transmitToClients(
-            msg, list(self.clientstack.peersWithoutRemotes))
 
     @property
     def clientStackName(self):
@@ -1715,7 +1709,7 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
         needStaticValidation = False
         if all([msg.get(OPERATION), msg.get(f.REQ_ID.nm),
                 idr_from_req_data(msg)]):
-            cls = self._client_request_class
+            cls = self.client_request_class
             needStaticValidation = True
         elif OP_FIELD_NAME in msg:
             op = msg[OP_FIELD_NAME]
@@ -2212,7 +2206,7 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
                      format(self.name, msg))
 
         reqDict = msg.request
-        request = self._client_request_class(**reqDict)
+        request = self.client_request_class(**reqDict)
 
         clientName = msg.senderClient
 

@@ -16,6 +16,8 @@ from crypto.bls.bls_key_manager import LoadBLSKeyError
 from plenum.common.metrics_collector import KvStoreMetricsCollector, NullMetricsCollector, MetricsName, \
     async_measure_time, measure_time
 from plenum.server.inconsistency_watchers import NetworkInconsistencyWatcher
+from plenum.server.quota_control import QuotaControl, StaticQuotaControl, RequestQueueQuotaControl
+from plenum.server.replica import Replica
 from state.pruning_state import PruningState
 from state.state import State
 from storage.helper import initKeyValueStorage, initHashStore, initKeyValueStorageIntKeys
@@ -25,7 +27,7 @@ from stp_core.crypto.signer import Signer
 from stp_core.network.exceptions import RemoteNotFound
 from stp_core.network.network_interface import NetworkInterface
 from stp_core.types import HA
-from stp_zmq.zstack import ZStack
+from stp_zmq.zstack import ZStack, Quota
 from ledger.compact_merkle_tree import CompactMerkleTree
 from ledger.genesis_txn.genesis_txn_initiator_from_file import GenesisTxnInitiatorFromFile
 from ledger.hash_stores.hash_store import HashStore
@@ -385,6 +387,19 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
             (LedgerStatus, self.ledgerManager.processLedgerStatus),
             (CatchupReq, self.ledgerManager.processCatchupReq),
         )
+
+        # Quotas control
+        node_quota = Quota(count=config.NODE_TO_NODE_STACK_QUOTA,
+                           size=config.NODE_TO_NODE_STACK_SIZE)
+        client_quota = Quota(count=config.CLIENT_TO_NODE_STACK_QUOTA,
+                             size=config.CLIENT_TO_NODE_STACK_SIZE)
+
+        if config.ENABLE_DYNAMIC_QUOTAS:
+            self.quota_control = RequestQueueQuotaControl(max_request_queue_size=config.MAX_REQUEST_QUEUE_SIZE,
+                                                          max_node_quota=node_quota,
+                                                          max_client_quota=client_quota)
+        else:
+            self.quota_control = StaticQuotaControl(node_quota=node_quota, client_quota=client_quota)
 
         # Ordered requests received from replicas while the node was not
         # participating
@@ -1050,6 +1065,8 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
 
         self.closeAllKVStores()
 
+        self._info_tool.stop()
+
         self.mode = None
         self.ledgerManager.prepare_ledgers_for_sync()
 
@@ -1097,6 +1114,10 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
             self.metrics.add_event(MetricsName.LOOPER_RUN_TIME_SPENT, time.perf_counter() - self.last_prod_started)
         self.last_prod_started = time.perf_counter()
 
+        self.quota_control.update_state({
+            'request_queue_size': len(self.monitor.requestTracker.unordered())}
+        )
+
         if self.status is not Status.stopped:
             c += await self.serviceReplicas(limit)
             c += await self.serviceNodeMsgs(limit)
@@ -1141,7 +1162,8 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
         :return: the number of messages successfully processed
         """
         with self.metrics.measure_time(MetricsName.SERVICE_NODE_STACK_TIME):
-            n = await self.nodestack.service(limit)
+            n = await self.nodestack.service(limit, self.quota_control.node_quota)
+
         self.metrics.add_event(MetricsName.NODE_STACK_MESSAGES_PROCESSED, n)
 
         await self.processNodeInBox()
@@ -1155,7 +1177,7 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
         :param limit: the maximum number of messages to process
         :return: the number of messages successfully processed
         """
-        c = await self.clientstack.service(limit)
+        c = await self.clientstack.service(limit, self.quota_control.client_quota)
         self.metrics.add_event(MetricsName.CLIENT_STACK_MESSAGES_PROCESSED, c)
 
         await self.processClientInBox()
@@ -2413,6 +2435,7 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
 
         self.transmitToClient(Reply(result), frm)
 
+    @measure_time(MetricsName.PROCESS_ORDERED_TIME)
     def processOrdered(self, ordered: Ordered):
         """
         Execute ordered request
@@ -2426,47 +2449,49 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
                            'does not exist'.format(self, ordered.instId))
             return False
 
+        valid_reqs = [self.requests[request_id].finalised
+                      for request_id in ordered.valid_reqIdr
+                      if request_id in self.requests and
+                      self.requests[request_id].finalised]
         if ordered.instId != self.instances.masterId:
             # Requests from backup replicas are not executed
             logger.trace("{} got ordered requests from backup replica {}"
                          .format(self, ordered.instId))
-            self.monitor.requestOrdered(ordered.reqIdr,
-                                        ordered.instId,
-                                        self.requests,
-                                        byMaster=False)
+            with self.metrics.measure_time(MetricsName.MONITOR_REQUEST_ORDERED_TIME):
+                self.monitor.requestOrdered(ordered.valid_reqIdr + ordered.invalid_reqIdr,
+                                            ordered.instId,
+                                            self.requests,
+                                            byMaster=False)
             return False
 
         logger.trace("{} got ordered requests from master replica"
                      .format(self))
-        requests = [self.requests[request_id].finalised
-                    for request_id in ordered.reqIdr
-                    if request_id in self.requests and
-                    self.requests[request_id].finalised]
 
-        if len(requests) != len(ordered.reqIdr):
+        if len(valid_reqs) != len(ordered.valid_reqIdr):
             logger.warning('{} did not find {} finalized '
                            'requests, but still ordered'
-                           .format(self, len(ordered.reqIdr) - len(requests)))
+                           .format(self, len(ordered.valid_reqIdr) - len(valid_reqs)))
             return False
 
         logger.debug("{} executing Ordered batch {} {} of {} requests"
                      .format(self.name,
                              ordered.viewNo,
                              ordered.ppSeqNo,
-                             len(ordered.reqIdr)))
+                             len(ordered.valid_reqIdr)))
 
         self.executeBatch(ordered.viewNo,
                           ordered.ppSeqNo,
                           ordered.ppTime,
-                          requests,
+                          valid_reqs,
                           ordered.ledgerId,
                           ordered.stateRootHash,
                           ordered.txnRootHash)
 
-        self.monitor.requestOrdered(ordered.reqIdr,
-                                    ordered.instId,
-                                    self.requests,
-                                    byMaster=True)
+        with self.metrics.measure_time(MetricsName.MONITOR_REQUEST_ORDERED_TIME):
+            self.monitor.requestOrdered(ordered.valid_reqIdr + ordered.invalid_reqIdr,
+                                        ordered.instId,
+                                        self.requests,
+                                        byMaster=True)
 
         return True
 
@@ -2529,6 +2554,8 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
         self.metrics.add_event(MetricsName.NODE_RSS_SIZE, ram_by_process.rss)
         self.metrics.add_event(MetricsName.NODE_VMS_SIZE, ram_by_process.vms)
 
+        self.metrics.add_event(MetricsName.REQUEST_QUEUE_SIZE, len(self.requests))
+
         self.metrics.flush_accumulated()
 
     @measure_time(MetricsName.NODE_CHECK_PERFORMANCE_TIME)
@@ -2561,17 +2588,12 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
             if backup_throughput is not None:
                 self.metrics.add_event(MetricsName.BACKUP_MONITOR_AVG_THROUGHPUT, backup_throughput)
 
-            master_latencies = self.monitor.getLatencies(self.instances.masterId).values()
-            if len(master_latencies) > 0:
-                self.metrics.add_event(MetricsName.MONITOR_AVG_LATENCY, mean(master_latencies))
+            avg_lat_master, avg_lat_backup = self.monitor.getLatencies()
+            if avg_lat_master:
+                self.metrics.add_event(MetricsName.MONITOR_AVG_LATENCY, avg_lat_master)
 
-            backup_latencies = {}
-            for lat_item in [self.monitor.getLatencies(instId) for instId in self.instances.backupIds]:
-                for cid, lat in lat_item.items():
-                    backup_latencies.setdefault(cid, []).append(lat)
-            backup_latencies = [mean(lat) for cid, lat in backup_latencies.items()]
-            if len(backup_latencies) > 0:
-                self.metrics.add_event(MetricsName.BACKUP_MONITOR_AVG_LATENCY, mean(backup_latencies))
+            if avg_lat_backup:
+                self.metrics.add_event(MetricsName.BACKUP_MONITOR_AVG_LATENCY, avg_lat_backup)
 
             if self.monitor.isMasterDegraded():
                 logger.display('{} master instance performance degraded'.format(self))
@@ -2775,6 +2797,7 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
                 return s.pop().data
         return None
 
+    @measure_time(MetricsName.EXECUTE_BATCH_TIME)
     def executeBatch(self, view_no, pp_seq_no: int, pp_time: float,
                      reqs: List[Request], ledger_id, state_root,
                      txn_root) -> None:
@@ -2873,13 +2896,16 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
                           state_root=stateRoot, txn_root=txnRoot)
         self.updateSeqNoMap(committedTxns, ledger_id)
         updated_committed_txns = list(map(self.update_txn_with_extra_data, committedTxns))
-        self.execute_hook(NodeHooks.PRE_SEND_REPLY, committed_txns=updated_committed_txns,
-                          pp_time=ppTime)
+        self.hook_pre_send_reply(updated_committed_txns, ppTime)
         self.sendRepliesToClients(updated_committed_txns, ppTime)
-        self.execute_hook(NodeHooks.POST_SEND_REPLY,
-                          committed_txns=updated_committed_txns,
-                          pp_time=ppTime)
+        self.hook_post_send_reply(updated_committed_txns, ppTime)
         return committedTxns
+
+    def hook_pre_send_reply(self, txns, pp_time):
+        self.execute_hook(NodeHooks.PRE_SEND_REPLY, committed_txns=txns, pp_time=pp_time)
+
+    def hook_post_send_reply(self, txns, pp_time):
+        self.execute_hook(NodeHooks.POST_SEND_REPLY, committed_txns=txns, pp_time=pp_time)
 
     def default_executer(self, ledger_id, pp_time, reqs: List[Request],
                          state_root, txn_root):
@@ -3024,7 +3050,7 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
                     '{} applying stashed Ordered msg {}'.format(self, msg))
                 # Since the PRE-PREPAREs ans PREPAREs corresponding to these
                 # stashed ordered requests was not processed.
-                self.apply_stashed_reqs(msg.reqIdr,
+                self.apply_stashed_reqs(msg.valid_reqIdr,
                                         msg.ppTime,
                                         msg.ledgerId)
 
@@ -3092,7 +3118,9 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
                                      Suspicions.PPR_REJECT_WRONG,
                                      Suspicions.PPR_TXN_WRONG,
                                      Suspicions.PPR_STATE_WRONG,
-                                     Suspicions.PPR_PLUGIN_EXCEPTION)):
+                                     Suspicions.PPR_PLUGIN_EXCEPTION,
+                                     Suspicions.PPR_SUB_SEQ_NO_WRONG,
+                                     Suspicions.PPR_NOT_FINAL)):
             logger.display('{}{} got one of primary suspicions codes {}'.format(VIEW_CHANGE_PREFIX, self, code))
             self.view_changer.on_suspicious_primary(Suspicions.get_by_code(code))
 
@@ -3200,6 +3228,7 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
         txn = ledger.getBySeqNo(int(seq_no))
         if txn:
             txn.update(ledger.merkleInfo(seq_no))
+            self.hook_pre_send_reply([txn], None)
             txn = self.update_txn_with_extra_data(txn)
             return Reply(txn)
         else:

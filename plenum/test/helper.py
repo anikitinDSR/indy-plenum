@@ -13,6 +13,7 @@ from typing import Tuple, Iterable, Dict, Optional, List, Any, Sequence, Union
 
 import pytest
 from indy.pool import set_protocol_version
+from plenum.config import Max3PCBatchWait
 from psutil import Popen
 import json
 import asyncio
@@ -339,7 +340,7 @@ def requestReturnedToNode(node: TestNode, key: str,
     params = getAllArgs(node, node.processOrdered)
     # Skipping the view no and time from each ordered request
     recvdOrderedReqs = [
-        (p['ordered'].instId, p['ordered'].reqIdr[0]) for p in params]
+        (p['ordered'].instId, p['ordered'].valid_reqIdr[0]) for p in params]
     expected = (instId, key)
     return expected in recvdOrderedReqs
 
@@ -645,7 +646,9 @@ def send_pre_prepare(view_no, pp_seq_no, wallet, nodes,
         "random digest",
         DOMAIN_LEDGER_ID,
         state_root or '0' * 44,
-        txn_root or '0' * 44
+        txn_root or '0' * 44,
+        0,
+        True
     )
     primary_node = getPrimaryReplica(nodes).node
     non_primary_nodes = set(nodes) - {primary_node}
@@ -953,6 +956,9 @@ def sdk_send_random_and_check(looper, txnPoolNodeSet, sdk_pool, sdk_wallet, coun
 def sdk_send_batches_of_random_and_check(looper, txnPoolNodeSet, sdk_pool, sdk_wallet,
                                          num_reqs, num_batches=1, **kwargs):
     # This method assumes that `num_reqs` <= num_batches*MaxbatchSize
+    if num_reqs < num_batches:
+        raise BaseException(
+            'sdk_send_batches_of_random_and_check method assumes that `num_reqs` <= num_batches*MaxbatchSize')
     if num_batches == 1:
         return sdk_send_random_and_check(looper, txnPoolNodeSet, sdk_pool, sdk_wallet, num_reqs, **kwargs)
 
@@ -965,6 +971,24 @@ def sdk_send_batches_of_random_and_check(looper, txnPoolNodeSet, sdk_pool, sdk_w
         rem = num_reqs // num_batches
     sdk_replies.extend(sdk_send_random_and_check(looper, txnPoolNodeSet, sdk_pool, sdk_wallet, rem, **kwargs))
     return sdk_replies
+
+
+def sdk_send_batches_of_random(looper, txnPoolNodeSet, sdk_pool, sdk_wallet,
+                               num_reqs, num_batches=1, timeout=Max3PCBatchWait):
+    if num_reqs < num_batches:
+        raise BaseException(
+            'sdk_send_batches_of_random_and_check method assumes that `num_reqs` <= num_batches*MaxbatchSize')
+    if num_batches == 1:
+        req = sdk_send_random_requests(looper, sdk_pool, sdk_wallet, num_reqs)
+        looper.runFor(timeout)
+        return req
+
+    sdk_reqs = []
+    for _ in range(num_batches - 1):
+        sdk_reqs.extend(sdk_send_random_requests(looper, sdk_pool, sdk_wallet,
+                                                 num_reqs // num_batches))
+        looper.runFor(timeout)
+    return sdk_reqs
 
 
 def sdk_sign_request_from_dict(looper, sdk_wallet, op, reqId=None):

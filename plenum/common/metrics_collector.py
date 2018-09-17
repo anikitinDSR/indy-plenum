@@ -43,6 +43,8 @@ class MetricsName(IntEnum):
     ORDERED_BATCH_SIZE = 12
     # Time spent on requests processing on master instance
     REQUEST_PROCESSING_TIME = 13
+    # Number of invalid request for master
+    ORDERED_BATCH_INVALID_COUNT = 14
 
     # Average throughput measured by monitor on backup instances
     BACKUP_MONITOR_AVG_THROUGHPUT = 20
@@ -52,6 +54,9 @@ class MetricsName(IntEnum):
     MONITOR_AVG_THROUGHPUT = 22
     # Average latency measured by monitor on master instance
     MONITOR_AVG_LATENCY = 23
+
+    # Node incoming request queue size
+    REQUEST_QUEUE_SIZE = 30
 
     # System statistics
     AVAILABLE_RAM_SIZE = 50
@@ -86,6 +91,9 @@ class MetricsName(IntEnum):
     NODE_SEND_REJECT_TIME = 210
     VALIDATE_NODE_MSG_TIME = 211
     INT_VALIDATE_NODE_MSG_TIME = 212
+    PROCESS_ORDERED_TIME = 213
+    MONITOR_REQUEST_ORDERED_TIME = 214
+    EXECUTE_BATCH_TIME = 215
 
     # Replica specific metrics
     SERVICE_REPLICA_QUEUES_TIME = 300

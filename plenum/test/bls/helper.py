@@ -8,7 +8,7 @@ from plenum.common.txn_util import get_type, reqToTxn
 from plenum.server.quorums import Quorums
 from crypto.bls.bls_multi_signature import MultiSignatureValue
 from state.pruning_state import PruningState
-from common.serializers.serialization import state_roots_serializer, proof_nodes_serializer
+from common.serializers.serialization import state_roots_serializer, proof_nodes_serializer, invalid_index_serializer
 from plenum.common.constants import DOMAIN_LEDGER_ID, STATE_PROOF, TXN_TYPE, MULTI_SIGNATURE, \
     MULTI_SIGNATURE_PARTICIPANTS, MULTI_SIGNATURE_SIGNATURE, MULTI_SIGNATURE_VALUE
 from plenum.common.keygen_utils import init_bls_keys
@@ -101,6 +101,14 @@ def calculate_multi_sig(creator, bls_bft_with_commits, quorums, pre_prepare):
     return creator._calculate_multi_sig(key, pre_prepare)
 
 
+def init_discarded(value=None):
+    """init discarded field with value and return message like representation"""
+    discarded = []
+    if value:
+        discarded.append(value)
+    return invalid_index_serializer.serialize(discarded, toBytes=False)
+
+
 def create_pre_prepare_params(state_root,
                               ledger_id=DOMAIN_LEDGER_ID,
                               txn_root=None,
@@ -111,11 +119,13 @@ def create_pre_prepare_params(state_root,
               0,
               timestamp or get_utc_epoch(),
               ["random request digest"],
-              0,
+              init_discarded(0),
               "random digest",
               ledger_id,
               state_root,
-              txn_root or '1' * 32]
+              txn_root or '1' * 32,
+              0,
+              True]
     if bls_multi_sig:
         params.append(bls_multi_sig.as_list())
     return params

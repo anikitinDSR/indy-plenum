@@ -11,7 +11,8 @@ import sys
 import functools
 
 from common.exceptions import LogicError, PlenumValueError
-from common.serializers.serialization import serialize_msg_for_signing, state_roots_serializer
+from common.serializers.serialization import serialize_msg_for_signing, state_roots_serializer, \
+    invalid_index_serializer
 from crypto.bls.bls_bft_replica import BlsBftReplica
 from orderedset import OrderedSet
 
@@ -104,6 +105,8 @@ PP_APPLY_WRONG_DIGEST = 8
 PP_APPLY_WRONG_STATE = 9
 PP_APPLY_ROOT_HASH_MISMATCH = 10
 PP_APPLY_HOOK_ERROR = 11
+PP_SUB_SEQ_NO_WRONG = 12
+PP_NOT_FINAL = 13
 
 
 def measure_replica_time(master_name: MetricsName, backup_name: MetricsName):
@@ -728,7 +731,7 @@ class Replica(HasActionQueue, MessageProcessor, HookManager):
             self.metrics.add_event(MetricsName.BACKUP_THREE_PC_BATCH_SIZE, len(pp.reqIdr))
 
         self.batches[(pp.viewNo, pp.ppSeqNo)] = [pp.ledgerId, pp.discarded,
-                                                 pp.ppTime, prevStateRootHash]
+                                                 pp.ppTime, prevStateRootHash, len(pp.reqIdr)]
 
     def send3PCBatch(self):
         r = 0
@@ -758,25 +761,14 @@ class Replica(HasActionQueue, MessageProcessor, HookManager):
     def processReqDuringBatch(
             self,
             req: Request,
-            cons_time: int,
-            validReqs: List,
-            inValidReqs: List,
-            rejects: List):
+            cons_time: int):
         """
-        This method will do dynamic validation and apply requests, also it
-        will modify `validReqs`, `inValidReqs` and `rejects`
+        This method will do dynamic validation and apply requests.
+        If there is any errors during validation it would be raised
         """
-        try:
-            if self.isMaster:
-                self.node.doDynamicValidation(req)
-                self.node.applyReq(req, cons_time)
-        except (InvalidClientMessageException, UnknownIdentifier) as ex:
-            self.logger.warning('{} encountered exception {} while processing {}, '
-                                'will reject'.format(self, ex, req))
-            rejects.append((req.key, Reject(req.identifier, req.reqId, ex)))
-            inValidReqs.append(req)
-        else:
-            validReqs.append(req)
+        if self.isMaster:
+            self.node.doDynamicValidation(req)
+            self.node.applyReq(req, cons_time)
 
     @measure_replica_time(MetricsName.CREATE_3PC_BATCH_TIME,
                           MetricsName.BACKUP_CREATE_3PC_BATCH_TIME)
@@ -791,29 +783,31 @@ class Replica(HasActionQueue, MessageProcessor, HookManager):
             if last_ordered_ts:
                 self.last_accepted_pre_prepare_time = last_ordered_ts
 
-        validReqs, inValidReqs, rejects, tm = self.consume_req_queue_for_pre_prepare(
+        reqs, invalid_indices, rejects, tm = self.consume_req_queue_for_pre_prepare(
             ledger_id, self.viewNo,
             pp_seq_no)
-        if not (validReqs or inValidReqs):
+        if len(reqs) == 0:
             self.logger.trace('{} not creating a Pre-Prepare for view no {} '
                               'seq no {}'.format(self, self.viewNo, pp_seq_no))
             return
 
-        reqs = validReqs + inValidReqs
         digest = self.batchDigest(reqs)
 
         state_root_hash = self.stateRootHash(ledger_id)
+        """TODO: for now default value for fields sub_seq_no is 0 and for final is True"""
         params = [
             self.instId,
             self.viewNo,
             pp_seq_no,
             tm,
             [req.digest for req in reqs],
-            len(validReqs),
+            invalid_index_serializer.serialize(invalid_indices, toBytes=False),
             digest,
             ledger_id,
             state_root_hash,
-            self.txnRootHash(ledger_id)
+            self.txnRootHash(ledger_id),
+            0,
+            True
         ]
 
         # BLS multi-sig:
@@ -825,7 +819,7 @@ class Replica(HasActionQueue, MessageProcessor, HookManager):
             pre_prepare = rv if rv is not None else pre_prepare
 
         self.logger.trace('{} created a PRE-PREPARE with {} requests for ledger {}'.format(
-            self, len(validReqs), ledger_id))
+            self, len(reqs), ledger_id))
         self.lastPrePrepareSeqNo = pp_seq_no
         self.last_accepted_pre_prepare_time = tm
         if self.isMaster:
@@ -840,21 +834,31 @@ class Replica(HasActionQueue, MessageProcessor, HookManager):
         # tm = self.utc_epoch
         tm = self.get_utc_epoch_for_preprepare(self.instId, view_no,
                                                pp_seq_no)
-        validReqs = []
-        inValidReqs = []
+        reqs = []
         rejects = []
-        while len(validReqs) + len(inValidReqs) < self.config.Max3PCBatchSize \
+        invalid_indices = []
+        idx = 0
+        while len(reqs) < self.config.Max3PCBatchSize \
                 and self.requestQueues[ledger_id]:
             key = self.requestQueues[ledger_id].pop(0)
             if key in self.requests:
                 fin_req = self.requests[key].finalised
-                self.processReqDuringBatch(
-                    fin_req, tm, validReqs, inValidReqs, rejects)
+                try:
+                    self.processReqDuringBatch(fin_req,
+                                               tm)
+                except (InvalidClientMessageException, UnknownIdentifier) as ex:
+                    self.logger.warning('{} encountered exception {} while processing {}, '
+                                        'will reject'.format(self, ex, fin_req))
+                    rejects.append((fin_req.key, Reject(fin_req.identifier, fin_req.reqId, ex)))
+                    invalid_indices.append(idx)
+                finally:
+                    reqs.append(fin_req)
+                idx += 1
             else:
                 self.logger.debug('{} found {} in its request queue but the '
                                   'corresponding request was removed'.format(self, key))
 
-        return validReqs, inValidReqs, rejects, tm
+        return reqs, invalid_indices, rejects, tm
 
     @measure_replica_time(MetricsName.SEND_PREPREPARE_TIME,
                           MetricsName.BACKUP_SEND_PREPREPARE_TIME)
@@ -1016,6 +1020,10 @@ class Replica(HasActionQueue, MessageProcessor, HookManager):
                     report_suspicious(Suspicions.PPR_TXN_WRONG)
                 elif why_not_applied == PP_APPLY_HOOK_ERROR:
                     report_suspicious(Suspicions.PPR_PLUGIN_EXCEPTION)
+                elif why_not_applied == PP_SUB_SEQ_NO_WRONG:
+                    report_suspicious(Suspicions.PPR_SUB_SEQ_NO_WRONG)
+                elif why_not_applied == PP_NOT_FINAL:
+                    report_suspicious(Suspicions.PPR_NOT_FINAL)
         elif why_not == PP_CHECK_NOT_FROM_PRIMARY:
             report_suspicious(Suspicions.PPR_FRM_NON_PRIMARY)
         elif why_not == PP_CHECK_TO_PRIMARY:
@@ -1259,9 +1267,10 @@ class Replica(HasActionQueue, MessageProcessor, HookManager):
         to the ledger and state
         """
 
-        valid_reqs = []
-        invalid_reqs = []
+        reqs = []
+        idx = 0
         rejects = []
+        invalid_indices = []
 
         if self.isMaster:
             old_state_root = \
@@ -1275,24 +1284,36 @@ class Replica(HasActionQueue, MessageProcessor, HookManager):
 
         for req_key in pre_prepare.reqIdr:
             req = self.requests[req_key].finalised
+            try:
+                self.processReqDuringBatch(req,
+                                           pre_prepare.ppTime)
+            except (InvalidClientMessageException, UnknownIdentifier) as ex:
+                self.logger.warning('{} encountered exception {} while processing {}, '
+                                    'will reject'.format(self, ex, req))
+                rejects.append((req.key, Reject(req.identifier, req.reqId, ex)))
+                invalid_indices.append(idx)
+            finally:
+                reqs.append(req)
+            idx += 1
 
-            self.processReqDuringBatch(req,
-                                       pre_prepare.ppTime,
-                                       valid_reqs,
-                                       invalid_reqs,
-                                       rejects)
+        invalid_from_pp = invalid_index_serializer.deserialize(pre_prepare.discarded)
 
         def revert():
             self.revert(pre_prepare.ledgerId,
                         old_state_root,
-                        len(valid_reqs))
-
-        if len(valid_reqs) != pre_prepare.discarded:
+                        len(pre_prepare.reqIdr) - len(invalid_from_pp))
+        if len(invalid_indices) != len(invalid_from_pp):
             if self.isMaster:
                 revert()
             return PP_APPLY_REJECT_WRONG
 
-        digest = self.batchDigest(valid_reqs + invalid_reqs)
+        if pre_prepare.sub_seq_no != 0:
+            return PP_SUB_SEQ_NO_WRONG
+
+        if not pre_prepare.final:
+            return PP_NOT_FINAL
+
+        digest = self.batchDigest(reqs)
 
         # A PRE-PREPARE is sent that does not match request digest
         if digest != pre_prepare.digest:
@@ -1749,9 +1770,18 @@ class Replica(HasActionQueue, MessageProcessor, HookManager):
             )
 
         self.addToOrdered(*key)
+        invalid_indices = invalid_index_serializer.deserialize(pp.discarded)
+        invalid_reqIdr = []
+        valid_reqIdr = []
+        for ind, reqIdr in enumerate(pp.reqIdr):
+            if ind in invalid_indices:
+                invalid_reqIdr.append(reqIdr)
+            else:
+                valid_reqIdr.append(reqIdr)
         ordered = Ordered(self.instId,
                           pp.viewNo,
-                          pp.reqIdr[:pp.discarded],
+                          valid_reqIdr,
+                          invalid_reqIdr,
                           pp.ppSeqNo,
                           pp.ppTime,
                           pp.ledgerId,
@@ -1767,17 +1797,18 @@ class Replica(HasActionQueue, MessageProcessor, HookManager):
         self.logger.debug("{} ordered batch request, view no {}, ppSeqNo {}, "
                           "ledger {}, state root {}, txn root {}, requests ordered {}, discarded {}".
                           format(self, pp.viewNo, pp.ppSeqNo, pp.ledgerId,
-                                 pp.stateRootHash, pp.txnRootHash, pp.reqIdr[:pp.discarded],
-                                 pp.reqIdr[pp.discarded:]))
+                                 pp.stateRootHash, pp.txnRootHash, valid_reqIdr,
+                                 invalid_reqIdr))
         self.logger.info("{} ordered batch request, view no {}, ppSeqNo {}, "
                          "ledger {}, state root {}, txn root {}, requests ordered {}, discarded {}".
                          format(self, pp.viewNo, pp.ppSeqNo, pp.ledgerId,
-                                pp.stateRootHash, pp.txnRootHash, len(pp.reqIdr[:pp.discarded]),
-                                len(pp.reqIdr[pp.discarded:])))
+                                pp.stateRootHash, pp.txnRootHash, len(valid_reqIdr),
+                                len(invalid_reqIdr)))
         if self.isMaster:
-            self.metrics.add_event(MetricsName.ORDERED_BATCH_SIZE, pp.discarded)
+            self.metrics.add_event(MetricsName.ORDERED_BATCH_SIZE, len(valid_reqIdr) + len(invalid_reqIdr))
+            self.metrics.add_event(MetricsName.ORDERED_BATCH_INVALID_COUNT, len(invalid_reqIdr))
         else:
-            self.metrics.add_event(MetricsName.BACKUP_ORDERED_BATCH_SIZE, pp.discarded)
+            self.metrics.add_event(MetricsName.BACKUP_ORDERED_BATCH_SIZE, len(valid_reqIdr))
 
         self.addToCheckpoint(pp.ppSeqNo, pp.digest, pp.ledgerId, pp.viewNo)
 
@@ -2558,9 +2589,10 @@ class Replica(HasActionQueue, MessageProcessor, HookManager):
         i = 0
         for key in sorted(self.batches.keys(), reverse=True):
             if compare_3PC_keys(self.last_ordered_3pc, key) > 0:
-                ledger_id, count, _, prevStateRoot = self.batches.pop(key)
+                ledger_id, discarded, _, prevStateRoot, len_reqIdr = self.batches.pop(key)
+                discarded = invalid_index_serializer.deserialize(discarded)
                 self.logger.debug('{} reverting 3PC key {}'.format(self, key))
-                self.revert(ledger_id, prevStateRoot, count)
+                self.revert(ledger_id, prevStateRoot, len_reqIdr - len(discarded))
                 i += 1
             else:
                 break

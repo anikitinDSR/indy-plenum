@@ -177,7 +177,7 @@ STATS_SERVER_MESSAGE_BUFFER_MAX_SIZE = 1000
 
 # Node status configuration
 DUMP_VALIDATOR_INFO_INIT_SEC = 3
-DUMP_VALIDATOR_INFO_PERIOD_SEC = 60
+DUMP_VALIDATOR_INFO_PERIOD_SEC = 600
 
 # Controls sending of view change messages, a node will only send view change
 # messages if it did not send any sent instance change messages in last
@@ -325,7 +325,7 @@ STACK_COMPANION = 0
 ENABLE_INCONSISTENCY_WATCHER_NETWORK = True
 
 METRICS_COLLECTOR_TYPE = None  # None or 'kv'
-METRICS_FLUSH_INTERVAL = 1.0  # seconds
+METRICS_FLUSH_INTERVAL = 10.0  # seconds
 METRICS_KV_STORAGE = KeyValueStorageType.Rocksdb
 METRICS_KV_DB_NAME = 'metrics_db'
 METRICS_KV_CONFIG = rocksdb_default_config.copy()

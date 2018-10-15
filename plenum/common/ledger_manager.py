@@ -92,23 +92,21 @@ class LedgerManager(HasActionQueue):
 
     def _cancel_request_ledger_statuses_and_consistency_proofs(self, ledger_id):
         if ledger_id in self.request_ledger_status_action_ids:
-            action = self.request_ledger_status_action_ids.pop(ledger_id)
-            self._cancel(action)
+            action_id = self.request_ledger_status_action_ids.pop(ledger_id)
+            self._cancel(aid=action_id)
 
         if ledger_id in self.request_consistency_proof_action_ids:
-            action = self.request_consistency_proof_action_ids.pop(ledger_id)
-            self._cancel(action)
+            action_id = self.request_consistency_proof_action_ids.pop(ledger_id)
+            self._cancel(aid=action_id)
 
     def reask_for_ledger_status(self, ledger_id):
-        if ledger_id in self.request_ledger_status_action_ids:
-            self.request_ledger_status_action_ids.pop(ledger_id)
+        self.request_ledger_status_action_ids.pop(ledger_id, None)
         ledgerInfo = self.getLedgerInfoByType(ledger_id)
         nodes = [node for node in self.owner.nodeReg if node not in ledgerInfo.ledgerStatusOk]
         self.owner.request_ledger_status_from_nodes(ledger_id, nodes)
 
     def reask_for_last_consistency_proof(self, ledger_id):
-        if ledger_id in self.request_consistency_proof_action_ids:
-            self.request_consistency_proof_action_ids.pop(ledger_id)
+        self.request_consistency_proof_action_ids.pop(ledger_id, None)
         ledgerInfo = self.getLedgerInfoByType(ledger_id)
         recvdConsProof = ledgerInfo.recvdConsistencyProofs
         ledger_status = self.owner.build_ledger_status(ledger_id)
@@ -538,32 +536,30 @@ class LedgerManager(HasActionQueue):
         # If `catchUpReplies` has any transaction that has not been applied
         # to the ledger
         catchUpReplies = catchUpReplies[numProcessed:]
-        if catchUpReplies:
+        ledgerInfo = self.getLedgerInfoByType(ledgerId)
+        while catchUpReplies and catchUpReplies[0][0] - ledger.seqNo == 1:
             seqNo = catchUpReplies[0][0]
-            if seqNo - ledger.seqNo == 1:
-                result, nodeName, toBeProcessed = self.hasValidCatchupReplies(
-                    ledgerId, ledger, seqNo, catchUpReplies)
-                if result:
-                    ledgerInfo = self.getLedgerInfoByType(ledgerId)
-                    for _, txn in catchUpReplies[:toBeProcessed]:
-                        self._add_txn(ledgerId, ledger,
-                                      ledgerInfo, txn)
-                    self._removePrcdCatchupReply(ledgerId, nodeName, seqNo)
-                    return numProcessed + toBeProcessed + \
-                        self._processCatchupReplies(ledgerId, ledger,
-                                                    catchUpReplies[toBeProcessed:])
-                else:
-                    if self.ownedByNode:
-                        self.owner.blacklistNode(nodeName,
-                                                 reason="Sent transactions "
-                                                        "that could not be "
-                                                        "verified")
-                        self._removePrcdCatchupReply(ledgerId, nodeName,
-                                                     seqNo)
-                        # Invalid transactions have to be discarded so letting
-                        # the caller know how many txns have to removed from
-                        # `self.receivedCatchUpReplies`
-                        return numProcessed + toBeProcessed
+            result, nodeName, toBeProcessed = self.hasValidCatchupReplies(
+                ledgerId, ledger, seqNo, catchUpReplies)
+            if result:
+                for _, txn in catchUpReplies[:toBeProcessed]:
+                    self._add_txn(ledgerId, ledger,
+                                  ledgerInfo, txn)
+                self._removePrcdCatchupReply(ledgerId, nodeName, seqNo)
+                numProcessed += toBeProcessed
+                catchUpReplies = catchUpReplies[toBeProcessed:]
+            else:
+                if self.ownedByNode:
+                    self.owner.blacklistNode(nodeName,
+                                             reason="Sent transactions "
+                                                    "that could not be "
+                                                    "verified")
+                    self._removePrcdCatchupReply(ledgerId, nodeName,
+                                                 seqNo)
+                    # Invalid transactions have to be discarded so letting
+                    # the caller know how many txns have to removed from
+                    # `self.receivedCatchUpReplies`
+                    return numProcessed + toBeProcessed
         return numProcessed
 
     def _add_txn(self, ledgerId, ledger: Ledger, ledgerInfo, txn):

@@ -9,6 +9,7 @@ from statistics import mean
 from typing import Dict, Any, Mapping, Iterable, List, Optional, Set, Tuple, Callable
 
 import psutil
+import sys
 from intervaltree import IntervalTree
 
 from common.exceptions import LogicError
@@ -2041,6 +2042,7 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
         # TODO: Maybe a slight optimisation is to check result of
         # `self.num_txns_caught_up_in_last_catchup()`
         self.processStashedOrderedReqs()
+        self.mode = Mode.synced
 
         # More than one catchup may be needed during the current ViewChange protocol
         # TODO: separate view change and catchup logic
@@ -2152,7 +2154,6 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
     def no_more_catchups_needed(self):
         # This method is called when no more catchups needed
         self._catch_up_start_ts = 0
-        self.mode = Mode.synced
         self.view_changer.on_catchup_complete()
         # TODO: need to think of a better way
         # If the node was not participating but has now found a primary,
@@ -2603,6 +2604,10 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
                                len(self.monitor.requestTracker.unordered()))
 
         # Collections metrics
+        def sum_for_values(obj):
+            # We don't want to get 0 if we have huge dictionary of empty queues, hence +1
+            return sum(len(v) + 1 for v in obj.values())
+
         self.metrics.add_event(MetricsName.NODE_STACK_RX_MSGS, len(self.nodestack.rxMsgs))
         self.metrics.add_event(MetricsName.CLIENT_STACK_RX_MSGS, len(self.clientstack.rxMsgs))
 
@@ -2626,13 +2631,12 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
         if self.primaryDecider:
             self.metrics.add_event(MetricsName.PRIMARY_DECIDER_ACTION_QUEUE, len(self.primaryDecider.actionQueue))
             self.metrics.add_event(MetricsName.PRIMARY_DECIDER_AQ_STASH, len(self.primaryDecider.aqStash))
-            self.metrics.add_event(MetricsName.PRIMARY_DECIDER_REPEATING_ACTIONS, len(self.primaryDecider.repeatingActions))
+            self.metrics.add_event(MetricsName.PRIMARY_DECIDER_REPEATING_ACTIONS,
+                                   len(self.primaryDecider.repeatingActions))
             self.metrics.add_event(MetricsName.PRIMARY_DECIDER_SCHEDULED, len(self.primaryDecider.scheduled))
             self.metrics.add_event(MetricsName.PRIMARY_DECIDER_INBOX, len(self.primaryDecider.inBox))
             self.metrics.add_event(MetricsName.PRIMARY_DECIDER_OUTBOX, len(self.primaryDecider.outBox))
 
-        self.metrics.add_event(MetricsName.MONITOR_NUM_ORDERED_REQUESTS, len(self.monitor.numOrderedRequests))
-        self.metrics.add_event(MetricsName.MONITOR_THROUGHPUTS, len(self.monitor.throughputs))
         self.metrics.add_event(MetricsName.MONITOR_ORDERED_REQUESTS_IN_LAST, len(self.monitor.orderedRequestsInLast))
 
         self.metrics.add_event(MetricsName.MSGS_FOR_FUTURE_REPLICAS, len(self.msgsForFutureReplicas))
@@ -2642,7 +2646,6 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
 
         self.metrics.add_event(MetricsName.MSGS_FOR_FUTURE_VIEWS, len(self.msgsForFutureViews))
         self.metrics.add_event(MetricsName.TXN_SEQ_RANGE_TO_3PHASE_KEY, len(self.txn_seq_range_to_3phase_key))
-        self.metrics.add_event(MetricsName.LAST_PERFORMANCE_CHECK_DATA, len(self._last_performance_check_data))
 
         self.metrics.add_event(MetricsName.LEDGERMANAGER_POOL_UNCOMMITEDS, len(
             self.ledgerManager.getLedgerInfoByType(0).ledger.uncommittedTxns))
@@ -2662,9 +2665,9 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
         self.metrics.add_event(MetricsName.REPLICA_PREPREPARES_PENDING_PREVPP_MASTER,
                                len(self.master_replica.prePreparesPendingPrevPP))
         self.metrics.add_event(MetricsName.REPLICA_PREPARES_WAITING_FOR_PREPREPARE_MASTER,
-                               len(self.master_replica.preparesWaitingForPrePrepare))
+                               sum_for_values(self.master_replica.preparesWaitingForPrePrepare))
         self.metrics.add_event(MetricsName.REPLICA_COMMITS_WAITING_FOR_PREPARE_MASTER,
-                               len(self.master_replica.commitsWaitingForPrepare))
+                               sum_for_values(self.master_replica.commitsWaitingForPrepare))
         self.metrics.add_event(MetricsName.REPLICA_SENT_PREPREPARES_MASTER, len(self.master_replica.sentPrePrepares))
         self.metrics.add_event(MetricsName.REPLICA_PREPREPARES_MASTER, len(self.master_replica.prePrepares))
         self.metrics.add_event(MetricsName.REPLICA_PREPARES_MASTER, len(self.master_replica.prepares))
@@ -2672,13 +2675,14 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
         self.metrics.add_event(MetricsName.REPLICA_ORDERED_MASTER, len(self.master_replica.ordered))
         self.metrics.add_event(MetricsName.REPLICA_PRIMARYNAMES_MASTER, len(self.master_replica.primaryNames))
         self.metrics.add_event(MetricsName.REPLICA_STASHED_OUT_OF_ORDER_COMMITS_MASTER,
-                               len(self.master_replica.stashed_out_of_order_commits))
+                               sum_for_values(self.master_replica.stashed_out_of_order_commits))
         self.metrics.add_event(MetricsName.REPLICA_CHECKPOINTS_MASTER, len(self.master_replica.checkpoints))
         self.metrics.add_event(MetricsName.REPLICA_STASHED_RECVD_CHECKPOINTS_MASTER,
-                               len(self.master_replica.stashedRecvdCheckpoints))
+                               sum_for_values(self.master_replica.stashedRecvdCheckpoints))
         self.metrics.add_event(MetricsName.REPLICA_STASHING_WHILE_OUTSIDE_WATERMARKS_MASTER,
                                len(self.master_replica.stashingWhileOutsideWaterMarks))
-        self.metrics.add_event(MetricsName.REPLICA_REQUEST_QUEUES_MASTER, len(self.master_replica.requestQueues))
+        self.metrics.add_event(MetricsName.REPLICA_REQUEST_QUEUES_MASTER,
+                               sum_for_values(self.master_replica.requestQueues))
         self.metrics.add_event(MetricsName.REPLICA_BATCHES_MASTER, len(self.master_replica.batches))
         self.metrics.add_event(MetricsName.REPLICA_REQUESTED_PRE_PREPARES_MASTER,
                                len(self.master_replica.requested_pre_prepares))
@@ -2694,7 +2698,11 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
         self.metrics.add_event(MetricsName.REPLICA_SCHEDULED_MASTER, len(self.master_replica.scheduled))
 
         def sum_for_backups(field):
-            return sum([len(getattr(r, field)) for r in self.replicas._replicas.values() if r is not self.master_replica])
+            return sum(len(getattr(r, field)) for r in self.replicas._replicas.values() if r is not self.master_replica)
+
+        def sum_for_values_for_backups(field):
+            return sum(sum_for_values(getattr(r, field))
+                       for r in self.replicas._replicas.values() if r is not self.master_replica)
 
         self.metrics.add_event(MetricsName.REPLICA_OUTBOX_BACKUP, sum_for_backups('outBox'))
         self.metrics.add_event(MetricsName.REPLICA_INBOX_BACKUP, sum_for_backups('inBox'))
@@ -2705,9 +2713,9 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
         self.metrics.add_event(MetricsName.REPLICA_PREPREPARES_PENDING_PREVPP_BACKUP,
                                sum_for_backups('prePreparesPendingPrevPP'))
         self.metrics.add_event(MetricsName.REPLICA_PREPARES_WAITING_FOR_PREPREPARE_BACKUP,
-                               sum_for_backups('preparesWaitingForPrePrepare'))
+                               sum_for_values_for_backups('preparesWaitingForPrePrepare'))
         self.metrics.add_event(MetricsName.REPLICA_COMMITS_WAITING_FOR_PREPARE_BACKUP,
-                               sum_for_backups('commitsWaitingForPrepare'))
+                               sum_for_values_for_backups('commitsWaitingForPrepare'))
         self.metrics.add_event(MetricsName.REPLICA_SENT_PREPREPARES_BACKUP, sum_for_backups('sentPrePrepares'))
         self.metrics.add_event(MetricsName.REPLICA_PREPREPARES_BACKUP, sum_for_backups('prePrepares'))
         self.metrics.add_event(MetricsName.REPLICA_PREPARES_BACKUP, sum_for_backups('prepares'))
@@ -2715,13 +2723,14 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
         self.metrics.add_event(MetricsName.REPLICA_ORDERED_BACKUP, sum_for_backups('ordered'))
         self.metrics.add_event(MetricsName.REPLICA_PRIMARYNAMES_BACKUP, sum_for_backups('primaryNames'))
         self.metrics.add_event(MetricsName.REPLICA_STASHED_OUT_OF_ORDER_COMMITS_BACKUP,
-                               sum_for_backups('stashed_out_of_order_commits'))
+                               sum_for_values_for_backups('stashed_out_of_order_commits'))
         self.metrics.add_event(MetricsName.REPLICA_CHECKPOINTS_BACKUP, sum_for_backups('checkpoints'))
         self.metrics.add_event(MetricsName.REPLICA_STASHED_RECVD_CHECKPOINTS_BACKUP,
-                               sum_for_backups('stashedRecvdCheckpoints'))
+                               sum_for_values_for_backups('stashedRecvdCheckpoints'))
         self.metrics.add_event(MetricsName.REPLICA_STASHING_WHILE_OUTSIDE_WATERMARKS_BACKUP,
                                sum_for_backups('stashingWhileOutsideWaterMarks'))
-        self.metrics.add_event(MetricsName.REPLICA_REQUEST_QUEUES_BACKUP, sum_for_backups('requestQueues'))
+        self.metrics.add_event(MetricsName.REPLICA_REQUEST_QUEUES_BACKUP,
+                               sum_for_values_for_backups('requestQueues'))
         self.metrics.add_event(MetricsName.REPLICA_BATCHES_BACKUP, sum_for_backups('batches'))
         self.metrics.add_event(MetricsName.REPLICA_REQUESTED_PRE_PREPARES_BACKUP,
                                sum_for_backups('requested_pre_prepares'))
@@ -2733,6 +2742,27 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
         self.metrics.add_event(MetricsName.REPLICA_AQ_STASH_BACKUP, sum_for_backups('aqStash'))
         self.metrics.add_event(MetricsName.REPLICA_REPEATING_ACTIONS_BACKUP, sum_for_backups('repeatingActions'))
         self.metrics.add_event(MetricsName.REPLICA_SCHEDULED_BACKUP, sum_for_backups('scheduled'))
+
+        # Most 'heavy' collections
+        requests_memory = sys.getsizeof(self.requests)
+        requests_memory_items = sum(sys.getsizeof(req.request.signature) + sys.getsizeof(req.request.operation)
+                                    for req in self.requests.values())
+        requests_memory_items += sum(sum(sys.getsizeof(p.signature) + sys.getsizeof(p.operation)
+                                         for p in req.propagates.values()) for req in self.requests.values())
+        self.metrics.add_event(MetricsName.MEMORY_REQUESTS, requests_memory)
+        self.metrics.add_event(MetricsName.MEMORY_REQUESTS_ITEMS, requests_memory_items)
+
+        uncommitted_memory = sys.getsizeof(self.requests)
+        uncommitted_memory_items = sum(
+            sys.getsizeof(txn['txn']['metadata']['digest']) + sys.getsizeof(txn['reqSignature']) +
+            sys.getsizeof(txn['txn']) + sys.getsizeof(txn['txn']['data']) +
+            sys.getsizeof(txn['txn']['metadata']) + sys.getsizeof(txn['txnMetadata'])
+            for txn in self.get_req_handler(DOMAIN_LEDGER_ID).ledger.uncommittedTxns)
+        uncommitted_memory_items += sum(sum(sys.getsizeof(v['value']) for v in txn['reqSignature']['values']) for txn in
+                                        self.get_req_handler(1).ledger.uncommittedTxns)
+
+        self.metrics.add_event(MetricsName.MEMORY_DOMAIN_LEDGER_UNCOMMITTED, uncommitted_memory)
+        self.metrics.add_event(MetricsName.MEMORY_DOMAIN_LEDGER_UNCOMMITTED_ITEMS, uncommitted_memory_items)
 
         self.metrics.flush_accumulated()
 
@@ -2932,13 +2962,8 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
                            extra={"cli": "ANNOUNCE",
                                   "tags": ["node-election"]})
 
-    def start_catchup(self, just_started=False):
+    def _do_start_catchup(self, just_started):
         # Process any already Ordered requests by the replica
-
-        if self.mode == Mode.starting:
-            logger.info('{} does not start the catchup procedure '
-                        'because it is already in this state'.format(self))
-            return
         self.force_process_ordered()
 
         # # revert uncommitted txns and state for unordered requests
@@ -2949,6 +2974,13 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
         self.ledgerManager.prepare_ledgers_for_sync()
         self.ledgerManager.catchup_ledger(self.ledgerManager.ledger_sync_order[0],
                                           request_ledger_statuses=not just_started)
+
+    def start_catchup(self, just_started=False):
+        if not self.is_synced and not just_started:
+            logger.info('{} does not start the catchup procedure '
+                        'because another catchup is in progress'.format(self))
+            return
+        self._do_start_catchup(just_started)
 
     def ordered_prev_view_msgs(self, inst_id, pp_seqno):
         logger.debug('{} ordered previous view batch {} by instance {}'.

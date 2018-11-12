@@ -2,7 +2,7 @@ import logging
 import sys
 
 from plenum.common.constants import ClientBootStrategy, HS_ROCKSDB, \
-    KeyValueStorageType
+    KeyValueStorageType, PreVCStrategies
 from plenum.common.throughput_measurements import RevivalSpikeResistantEMAThroughputMeasurement
 from plenum.common.types import PLUGIN_TYPE_STATS_CONSUMER
 from plenum.common.average_strategies import MedianLowStrategy, MedianHighStrategy
@@ -177,7 +177,7 @@ STATS_SERVER_MESSAGE_BUFFER_MAX_SIZE = 1000
 
 # Node status configuration
 DUMP_VALIDATOR_INFO_INIT_SEC = 3
-DUMP_VALIDATOR_INFO_PERIOD_SEC = 600
+DUMP_VALIDATOR_INFO_PERIOD_SEC = 60
 
 # Controls sending of view change messages, a node will only send view change
 # messages if it did not send any sent instance change messages in last
@@ -191,7 +191,7 @@ ToleratePrimaryDisconnection = 2
 # A node if finds itself disconnected from primary of some backup instance will
 # wait for `TolerateBackupPrimaryDisconnection` before remove its replica
 # in this backup instance
-TolerateBackupPrimaryDisconnection = 60
+TolerateBackupPrimaryDisconnection = 180
 
 # Timeout factor after which a node starts requesting consistency proofs if has
 # not found enough matching
@@ -347,3 +347,12 @@ ACC_MONITOR_INPUT_RATE_REACTION_HALF_TIME = 300
 VALIDATE_BLS_SIGNATURE_WITHOUT_KEY_PROOF = True
 
 VALIDATOR_INFO_USE_DB = False
+
+# Strategies for removing replicas. Available values:
+# - None - don't remove replicas
+# - "local" - remove replicas without quorum, if current node needs this
+# - "quorum" - remove replicas only with quorum of BackupInstanceFaulty
+REPLICAS_REMOVING_WITH_DEGRADATION = "quorum"
+REPLICAS_REMOVING_WITH_PRIMARY_DISCONNECTED = "local"
+
+EXTENDED_QUOTA_MULTIPLIER_BEFORE_VC = 10

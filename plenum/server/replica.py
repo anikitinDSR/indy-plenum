@@ -295,7 +295,7 @@ class Replica(HasActionQueue, MessageProcessor, HookManager):
         for ledger_id in self.ledger_ids:
             self.register_ledger(ledger_id)
 
-        self.batches = OrderedDict()  # type: OrderedDict[Tuple[int, int],
+        self.batches = OrderedDict()  # type: OrderedDict[Tuple[int, int]]
         # Tuple[int, float, bytes]]
 
         # TODO: Need to have a timer for each ledger
@@ -1888,14 +1888,26 @@ class Replica(HasActionQueue, MessageProcessor, HookManager):
         if not is_stashed_enough:
             return
 
-        self.logger.display('{} has lagged for {} checkpoints so updating watermarks to {}'.
-                            format(self, lag_in_checkpoints, stashed_checkpoint_ends[-1]))
-        self.h = stashed_checkpoint_ends[-1]
-
-        if self.isMaster and not self.isPrimary:
-            self.logger.display('{} has lagged for {} checkpoints so the catchup procedure starts'.
-                                format(self, lag_in_checkpoints))
-            self.node.start_catchup()
+        if self.isMaster:
+            self.logger.display(
+                '{} has lagged for {} checkpoints so updating watermarks to {}'.
+                format(self, lag_in_checkpoints, stashed_checkpoint_ends[-1]))
+            self.h = stashed_checkpoint_ends[-1]
+            if not self.isPrimary:
+                self.logger.display(
+                    '{} has lagged for {} checkpoints so the catchup procedure starts'.
+                    format(self, lag_in_checkpoints))
+                self.node.start_catchup()
+        else:
+            self.logger.info(
+                '{} has lagged for {} checkpoints so adjust last_ordered_3pc to {}, '
+                'shift watermarks and clean collections'.
+                format(self, lag_in_checkpoints, stashed_checkpoint_ends[-1]))
+            # Adjust last_ordered_3pc, shift watermarks, clean operational
+            # collections and process stashed messages which now fit between
+            # watermarks
+            self.caught_up_till_3pc((self.viewNo, stashed_checkpoint_ends[-1]))
+            self.processStashedMsgsForNewWaterMarks()
 
     def addToCheckpoint(self, ppSeqNo, digest, ledger_id, view_no):
         for (s, e) in self.checkpoints.keys():
@@ -2084,6 +2096,9 @@ class Replica(HasActionQueue, MessageProcessor, HookManager):
 
         for request_key in reqKeys:
             self.requests.free(request_key)
+            for ledger_id, keys in self.requestQueues.items():
+                if request_key in keys:
+                    self.discard_req_key(ledger_id, request_key)
             self.logger.trace('{} freed request {} from previous checkpoints'
                               .format(self, request_key))
 

@@ -194,8 +194,6 @@ class Monitor(HasActionQueue, PluginLoaderHelper):
 
         self.started = datetime.utcnow().isoformat()
 
-        self.orderedRequestsInLast = []
-
         # attention: handlers will work over unordered request only once
         self.unordered_requests_handlers = []  # type: List[Callable]
 
@@ -289,10 +287,14 @@ class Monitor(HasActionQueue, PluginLoaderHelper):
         return currNetwork
 
     @staticmethod
-    def create_throughput_measurement(config, start_ts=time.perf_counter()):
+    def create_throughput_measurement(config, start_ts=None):
+        if start_ts is None:
+            start_ts = time.perf_counter()
         tm = config.throughput_measurement_class(
             **config.throughput_measurement_params)
         tm.init_time(start_ts)
+        logger.trace("Creating throughput measurement class {} with parameters {} in start time {}"
+                     .format(str(config.throughput_measurement_class), str(config.throughput_measurement_params), start_ts))
         return tm
 
     def reset(self):
@@ -364,12 +366,6 @@ class Monitor(HasActionQueue, PluginLoaderHelper):
                             .format(key, self.name, instId, now - started))
             duration = self.requestTracker.order(instId, key, now)
             self.throughputs[instId].add_request(now)
-            if byMaster:
-                # TODO for now, view_change procedure can take more that 15 minutes
-                # (5 minutes for catchup and 10 minutes for primary's answer).
-                # Therefore, view_change triggering by max latency is not indicative now.
-                # self.masterReqLatencies[key] = duration
-                self.orderedRequestsInLast.append(now)
 
             if key in requests:
                 identifier = requests[key].request.identifier

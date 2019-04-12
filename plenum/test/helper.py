@@ -25,7 +25,7 @@ import json
 import asyncio
 
 from indy.ledger import sign_and_submit_request, sign_request, submit_request, build_node_request, \
-    build_pool_config_request
+    build_pool_config_request, multi_sign_request
 from indy.error import ErrorCode, IndyError
 
 from ledger.genesis_txn.genesis_txn_file_util import genesis_txn_file
@@ -311,7 +311,7 @@ def checkPrePrepareReqSent(replica: TestReplica, req: Request):
     prePreparesSent = getAllArgs(replica, replica.sendPrePrepare)
     expectedDigest = TestReplica.batchDigest([req])
     assert expectedDigest in [p["ppReq"].digest for p in prePreparesSent]
-    assert [req.digest, ] in \
+    assert (req.digest,) in \
            [p["ppReq"].reqIdr for p in prePreparesSent]
 
 
@@ -328,8 +328,8 @@ def checkPrepareReqSent(replica: TestReplica, key: str,
     rv = getAllReturnVals(replica,
                           replica.canPrepare)
     args = [p["ppReq"].reqIdr for p in paramsList if p["ppReq"].viewNo == view_no]
-    assert [key] in args
-    idx = args.index([key])
+    assert (key,) in args
+    idx = args.index((key,))
     assert rv[idx]
 
 
@@ -803,6 +803,11 @@ def sdk_sign_request_strings(looper, sdk_wallet, reqs: Sequence):
     reqs = [looper.loop.run_until_complete(sign_request(wallet_h, did, req))
             for req in reqs_str]
     return reqs
+
+
+def sdk_multisign_request_object(looper, sdk_wallet, req):
+    wh, did = sdk_wallet
+    return looper.loop.run_until_complete(multi_sign_request(wh, did, req))
 
 
 def sdk_signed_random_requests(looper, sdk_wallet, count):

@@ -7,8 +7,6 @@ from plenum.test.pool_transactions.helper import disconnect_node_and_ensure_disc
 from plenum.test.test_node import get_master_primary_node
 from plenum.test.view_change.helper import start_stopped_node, ensure_view_change_by_primary_restart
 
-TestRunningTimeLimitSec = 150
-
 
 @pytest.fixture(scope="module")
 def tconf(tconf):
@@ -70,13 +68,15 @@ def test_view_change_after_back_to_quorum_with_disconnected_primary(txnPoolNodeS
     restartedNode = start_stopped_node(non_primary_to_stop, looper, tconf,
                                        tdir, allPluginsPath,
                                        delay_instance_change_msgs=False)
+
     remaining_nodes = remaining_nodes + [restartedNode]
 
-    # 5. Check that view change happened.
+    # 5. Check that view change happened eventually because
+    # Delta may re-send InstanceChang for view=2 after it finished catchup
     waitForViewChange(looper, remaining_nodes, expectedViewNo=(view_no + 1),
-                      customTimeout=2 * tconf.VIEW_CHANGE_TIMEOUT)
+                      customTimeout=3 * tconf.VIEW_CHANGE_TIMEOUT)
 
-    # ensure pool is working properly
+    # 6. ensure pool is working properly
     sdk_send_random_and_check(looper, remaining_nodes, sdk_pool_handle,
                               sdk_wallet_client, 3)
     ensure_all_nodes_have_same_data(looper, nodes=remaining_nodes)

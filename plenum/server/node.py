@@ -2179,8 +2179,9 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
             state = self.getState(ledger_id)
             state.commit(rootHash=state.headHash)
             if ledger_id == DOMAIN_LEDGER_ID and rh.ts_store:
-                rh.ts_store.set(get_txn_time(txn),
-                                state.headHash)
+                timestamp = get_txn_time(txn)
+                if timestamp is not None:
+                    rh.ts_store.set(timestamp, state.headHash)
             logger.trace("{} added transaction with seqNo {} to ledger {} during catchup, state root {}"
                          .format(self, get_seq_no(txn), ledger_id,
                                  state_roots_serializer.serialize(bytes(state.committedHeadHash))))
@@ -3099,10 +3100,10 @@ class Node(HasActionQueue, Motor, Propagator, MessageProcessor, HasFileStorage,
 
         logger.display("{} primary has been disconnected for too long".format(self))
 
-        if not self.isReady():
+        if not self.isReady() or not self.is_synced:
             logger.info('{} The node is not ready yet '
                         'so view change will not be proposed now, but re-scheduled.'.format(self))
-            # self._schedule_view_change()
+            self._schedule_view_change()
             return
 
         self.view_changer.on_primary_loss()

@@ -39,6 +39,7 @@ poolStateDbName = 'pool_state'
 domainStateDbName = 'domain_state'
 configStateDbName = 'config_state'
 stateTsDbName = "state_ts_db"
+configStateTsDbName = "config_state_ts_db"
 
 stateSignatureDbName = 'state_signature'
 
@@ -401,3 +402,5 @@ PROCESS_STASHED_OUT_OF_ORDER_COMMITS_INTERVAL = 1  # seconds
 # Size limits for txn author agreement
 TXN_AUTHOR_AGREEMENT_VERSION_SIZE_LIMIT = 256
 TXN_AUTHOR_AGREEMENT_TEXT_SIZE_LIMIT = MSG_LEN_LIMIT - 2048
+TXN_AUTHOR_AGREEMENT_AML_VERSION_SIZE_LIMIT = 256
+TXN_AUTHOR_AGREEMENT_AML_CONTEXT_LIMIT = MSG_LEN_LIMIT - 2048

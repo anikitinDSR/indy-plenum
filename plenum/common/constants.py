@@ -104,6 +104,9 @@ LAST_TXN = "lastTxn"
 TXNS = "Txns"
 BY = "by"
 FORCE = 'force'
+AML_VERSION = 'version'
+AML = 'aml'
+AML_CONTEXT = 'amlContext'
 
 AUDIT_TXN_VIEW_NO = "viewNo"
 AUDIT_TXN_PP_SEQ_NO = "ppSeqNo"
@@ -174,6 +177,10 @@ TXN_SIGNATURE_VALUE = "value"
 
 TXN_AUTHOR_AGREEMENT_TEXT = "text"
 TXN_AUTHOR_AGREEMENT_VERSION = "version"
+
+GET_TXN_AUTHOR_AGREEMENT_VERSION = "version"
+GET_TXN_AUTHOR_AGREEMENT_DIGEST = "digest"
+GET_TXN_AUTHOR_AGREEMENT_TIMESTAMP = "timestamp"
 
 
 class ClientBootStrategy(IntEnum):

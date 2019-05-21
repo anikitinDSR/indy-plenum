@@ -4,12 +4,15 @@ import pytest
 from common.serializers.json_serializer import JsonSerializer
 
 from plenum.common.constants import REPLY, TXN_AUTHOR_AGREEMENT_TEXT, TXN_AUTHOR_AGREEMENT_VERSION, TXN_METADATA, \
-    TXN_METADATA_TIME, TXN_METADATA_SEQ_NO, CONFIG_LEDGER_ID
+    TXN_METADATA_TIME, TXN_METADATA_SEQ_NO, CONFIG_LEDGER_ID, REQNACK
+from plenum.common.exceptions import RequestNackedException
 from plenum.common.util import randomString
 from plenum.test.delayers import req_delay
 from plenum.test.stasher import delay_rules
 from plenum.test.txn_author_agreement.helper import sdk_get_txn_author_agreement, taa_digest, \
     sdk_send_txn_author_agreement, check_state_proof
+
+whitelist = ['Unexpected combination of request parameters']
 
 TEXT_V1 = randomString(1024)
 V1 = randomString(16)
@@ -23,7 +26,8 @@ TIMESTAMP_V2 = None  # type: Optional[int]
 
 
 @pytest.fixture(scope='module')
-def nodeSetWithTaaAlwaysResponding(txnPoolNodeSet, setup, looper, sdk_pool_handle, sdk_wallet_trustee):
+def nodeSetWithTaaAlwaysResponding(txnPoolNodeSet, set_txn_author_agreement_aml, looper, sdk_pool_handle,
+                                   sdk_wallet_trustee):
     global TIMESTAMP_V1, TIMESTAMP_V2
 
     # Force signing empty config state
@@ -61,13 +65,34 @@ def taa_value(result, text, version):
     })
 
 
-def test_get_txn_author_agreement_works_on_clear_state(looper, txnPoolNodeSet, sdk_pool_handle, sdk_wallet_client):
-    reply = sdk_get_txn_author_agreement(looper, sdk_pool_handle, sdk_wallet_client)[1]
+@pytest.mark.parametrize(argnames="params", argvalues=[
+    {},
+    {'digest': 'some_digest'},
+    {'version': 'some_version'},
+    {'timestamp': 374273}
+])
+def test_get_txn_author_agreement_works_on_clear_state(params, looper, txnPoolNodeSet,
+                                                       sdk_pool_handle, sdk_wallet_client):
+    reply = sdk_get_txn_author_agreement(looper, sdk_pool_handle, sdk_wallet_client, **params)[1]
     assert reply['op'] == REPLY
     assert reply['result']['data'] is None
 
 
-def test_get_txn_author_agreement_returns_latest_taa_by_default(looper, setup, nodeSetWithTaa,
+@pytest.mark.parametrize(argnames="params", argvalues=[
+    {'digest': 'some_digest', 'version': 'some_version'},
+    {'digest': 'some_digest', 'timestamp': 374273},
+    {'version': 'some_version', 'timestamp': 374273},
+    {'digest': 'some_digest', 'version': 'some_version', 'timestamp': 374273}
+])
+def test_get_txn_author_agreement_cannot_have_more_than_one_parameter(params, looper, txnPoolNodeSet,
+                                                                      sdk_pool_handle, sdk_wallet_client):
+    with pytest.raises(RequestNackedException) as e:
+        sdk_get_txn_author_agreement(looper, sdk_pool_handle, sdk_wallet_client, **params)
+    assert e.match("GET_TXN_AUTHOR_AGREEMENT request can have at most one "
+                   "of the following parameters: version, digest, timestamp")
+
+
+def test_get_txn_author_agreement_returns_latest_taa_by_default(looper, set_txn_author_agreement_aml, nodeSetWithTaa,
                                                                 sdk_pool_handle, sdk_wallet_client):
     reply = sdk_get_txn_author_agreement(looper, sdk_pool_handle, sdk_wallet_client)[1]
     assert reply['op'] == REPLY
@@ -78,7 +103,7 @@ def test_get_txn_author_agreement_returns_latest_taa_by_default(looper, setup, n
     check_state_proof(result, '2:latest', DIGEST_V2)
 
 
-def test_get_txn_author_agreement_can_return_taa_for_old_version(looper, setup, nodeSetWithTaa,
+def test_get_txn_author_agreement_can_return_taa_for_old_version(looper, nodeSetWithTaa,
                                                                  sdk_pool_handle, sdk_wallet_client):
     reply = sdk_get_txn_author_agreement(looper, sdk_pool_handle, sdk_wallet_client,
                                          version=V1)[1]
@@ -90,7 +115,7 @@ def test_get_txn_author_agreement_can_return_taa_for_old_version(looper, setup, 
     check_state_proof(result, '2:v:{}'.format(V1), DIGEST_V1)
 
 
-def test_get_txn_author_agreement_can_return_taa_for_current_version(looper, setup, nodeSetWithTaa,
+def test_get_txn_author_agreement_can_return_taa_for_current_version(looper, nodeSetWithTaa,
                                                                      sdk_pool_handle, sdk_wallet_client):
     reply = sdk_get_txn_author_agreement(looper, sdk_pool_handle, sdk_wallet_client,
                                          version=V2)[1]
@@ -102,7 +127,7 @@ def test_get_txn_author_agreement_can_return_taa_for_current_version(looper, set
     check_state_proof(result, '2:v:{}'.format(V2), DIGEST_V2)
 
 
-def test_get_txn_author_agreement_doesnt_return_taa_for_nonexistent_version(looper, setup, nodeSetWithTaa,
+def test_get_txn_author_agreement_doesnt_return_taa_for_nonexistent_version(looper, nodeSetWithTaa,
                                                                             sdk_pool_handle, sdk_wallet_client):
     invalid_version = randomString(16)
     reply = sdk_get_txn_author_agreement(looper, sdk_pool_handle, sdk_wallet_client,

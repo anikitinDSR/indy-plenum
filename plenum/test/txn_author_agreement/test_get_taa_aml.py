@@ -3,7 +3,7 @@ from random import randint
 from typing import Optional
 
 import pytest
-from indy.ledger import build_acceptance_mechanism_request
+from indy.ledger import build_acceptance_mechanisms_request
 from plenum.common.exceptions import RequestNackedException
 
 from plenum.common.types import OPERATION, f
@@ -32,7 +32,7 @@ TIMESTAMP_V2 = None  # type: Optional[int]
 
 
 def send_aml_request(looper, sdk_wallet_trustee, sdk_pool_handle, version, aml, context):
-    req = looper.loop.run_until_complete(build_acceptance_mechanism_request(
+    req = looper.loop.run_until_complete(build_acceptance_mechanisms_request(
         sdk_wallet_trustee[1],
         aml,
         version, context))
@@ -161,8 +161,7 @@ def test_get_taa_aml_doesnt_return_taa_for_nonexistent_version(looper, nodeSetWi
     check_state_proof(result, '3:v:{}'.format(invalid_version), None)
 
 
-# TODO: Change to nodeSetWithTaa when SDK will support state proofs with user-defined timestamps
-def test_get_taa_aml_can_return_taa_aml_for_old_ts(looper, nodeSetWithTaaAlwaysResponding,
+def test_get_taa_aml_can_return_taa_aml_for_old_ts(looper, nodeSetWithTaa,
                                                    sdk_pool_handle, sdk_wallet_client):
     reply = sdk_get_taa_aml(looper, sdk_pool_handle, sdk_wallet_client,
                             timestamp=TIMESTAMP_V2 - 2)[1]
@@ -173,8 +172,7 @@ def test_get_taa_aml_can_return_taa_aml_for_old_ts(looper, nodeSetWithTaaAlwaysR
     check_state_proof(result, '3:latest', taa_aml_value(result, V1, AML1, CONTEXT1))
 
 
-# TODO: Change to nodeSetWithTaa when SDK will support state proofs with user-defined timestamps
-def test_get_taa_aml_can_return_taa_aml_for_fresh_ts(looper, nodeSetWithTaaAlwaysResponding,
+def test_get_taa_aml_can_return_taa_aml_for_fresh_ts(looper, nodeSetWithTaa,
                                                      sdk_pool_handle, sdk_wallet_client):
     reply = sdk_get_taa_aml(looper, sdk_pool_handle, sdk_wallet_client,
                             timestamp=TIMESTAMP_V2 + 2)[1]
@@ -185,7 +183,7 @@ def test_get_taa_aml_can_return_taa_aml_for_fresh_ts(looper, nodeSetWithTaaAlway
     check_state_proof(result, '3:latest', taa_aml_value(result, V2, AML2, CONTEXT2))
 
 
-# TODO: Change to nodeSetWithTaa when SDK will support state proofs with user-defined timestamps
+# TODO: Change to nodeSetWithTaa when SDK will support this case
 def test_get_taa_aml_doesnt_return_taa_aml_when_it_didnt_exist(looper, nodeSetWithTaaAlwaysResponding,
                                                                sdk_pool_handle, sdk_wallet_client):
     reply = sdk_get_taa_aml(looper, sdk_pool_handle, sdk_wallet_client,

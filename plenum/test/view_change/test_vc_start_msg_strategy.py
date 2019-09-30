@@ -2,8 +2,11 @@ import json
 from collections import deque
 
 import functools
+from unittest.mock import Mock
+
 import pytest
 
+from plenum.common.event_bus import InternalBus
 from plenum.common.messages.node_messages import ViewChangeStartMessage, ViewChangeContinueMessage, Prepare, \
     InstanceChange
 from plenum.common.timer import QueueTimer
@@ -12,6 +15,7 @@ from plenum.server.node import Node
 from plenum.server.router import Router
 from plenum.server.view_change.node_view_changer import create_view_changer
 from plenum.server.view_change.pre_view_change_strategies import VCStartMsgStrategy
+from plenum.test.helper import MockNetwork
 from plenum.test.testing_utils import FakeSomething
 from stp_core.loop.eventually import eventually
 from stp_core.network.port_dispenser import genHa
@@ -25,6 +29,8 @@ def fake_node(tconf):
                          nodeStatusDB=None,
                          master_replica=FakeSomething(inBox=deque(),
                                                       inBoxRouter=Router(),
+                                                      _external_bus=MockNetwork(),
+                                                      internal_bus=InternalBus(),
                                                       logger=FakeSomething(
                                                           info=lambda *args, **kwargs: True
                                                       )),
@@ -40,8 +46,10 @@ def fake_node(tconf):
                              node_quota=Quota(count=100,
                                               size=100)),
                          nodestack=FakeSomething(
-                             service=lambda *args, **kwargs: eventually(lambda: True)
-                         ))
+                             service=lambda *args, **kwargs: eventually(lambda: True)),
+                         set_view_for_replicas= lambda view_no: None,
+                         set_view_change_status=lambda view_no: None
+                         )
     node.metrics = functools.partial(Node._createMetricsCollector, node)()
     node.process_one_node_message = functools.partial(Node.process_one_node_message, node)
     return node
@@ -63,12 +71,14 @@ def pre_vc_strategy(view_changer, fake_node):
     return strategy
 
 
+@pytest.mark.skip(reason="we don't use strategy now")
 def test_set_is_preparing_on_first_prepare_view_change_call(pre_vc_strategy):
     pre_vc_strategy.is_preparing = False
     pre_vc_strategy.prepare_view_change(1)
     assert pre_vc_strategy.is_preparing
 
 
+@pytest.mark.skip(reason="we don't use strategy now")
 def test_set_req_handlers_on_first_prepare_view_change_call(pre_vc_strategy):
     pre_vc_strategy.is_preparing = False
     pre_vc_strategy.prepare_view_change(1)
@@ -80,12 +90,12 @@ def test_set_req_handlers_on_first_prepare_view_change_call(pre_vc_strategy):
     assert req_handler.func.__name__ == VCStartMsgStrategy.on_view_change_started.__name__
 
     """Check, that req handler is set for ViewChangeContinuedMessage on replica's inBoxRouter"""
-    assert len(pre_vc_strategy.node.master_replica.inBoxRouter.routes) == 1
-    req_handler = pre_vc_strategy.node.master_replica.inBoxRouter.routes.get(ViewChangeContinueMessage, None)
+    req_handler = pre_vc_strategy.replica._external_bus.handlers(ViewChangeContinueMessage)[0]
     assert req_handler
-    assert req_handler.func.__name__ == VCStartMsgStrategy.on_view_change_continued.__name__
+    assert VCStartMsgStrategy.on_view_change_continued.__name__ in str(req_handler)
 
 
+@pytest.mark.skip(reason="we don't use strategy now")
 def test_add_vc_start_msg(pre_vc_strategy):
     pre_vc_strategy.is_preparing = False
     pre_vc_strategy.prepare_view_change(1)
@@ -98,18 +108,21 @@ def test_add_vc_start_msg(pre_vc_strategy):
     assert isinstance(m[0], ViewChangeStartMessage)
 
 
+@pytest.mark.skip(reason="we don't use strategy now")
 def test_do_not_add_vcs_msg_if_is_preparing_true(pre_vc_strategy):
     pre_vc_strategy.is_preparing = True
     pre_vc_strategy.prepare_view_change(1)
     assert len(pre_vc_strategy.node.nodeInBox) == 0
 
 
+@pytest.mark.skip(reason="we don't use strategy now")
 def test_do_not_set_req_handlers_if_is_preparing_true(pre_vc_strategy):
     pre_vc_strategy.is_preparing = True
     pre_vc_strategy.prepare_view_change(1)
     assert len(pre_vc_strategy.node.nodeMsgRouter.routes) == 0
 
 
+@pytest.mark.skip(reason="we don't use strategy now")
 def test_not_continue_vc_with_proposed_view_no_less_then_current(pre_vc_strategy, looper):
     pre_vc_strategy.view_changer.view_no = 2
     looper.run(pre_vc_strategy.on_view_change_started(pre_vc_strategy.node,
@@ -118,6 +131,7 @@ def test_not_continue_vc_with_proposed_view_no_less_then_current(pre_vc_strategy
     assert len(pre_vc_strategy.replica.inBox) == 0
 
 
+@pytest.mark.skip(reason="we don't use strategy now")
 def test_add_vc_continued_msg_on_view_change_started(pre_vc_strategy, looper):
     pre_vc_strategy.view_changer.view_no = 1
     looper.run(pre_vc_strategy.on_view_change_started(pre_vc_strategy.node,
@@ -128,6 +142,7 @@ def test_add_vc_continued_msg_on_view_change_started(pre_vc_strategy, looper):
     assert isinstance(m, ViewChangeContinueMessage)
 
 
+@pytest.mark.skip(reason="we don't use strategy now")
 def test_stash_not_3PC_msgs(pre_vc_strategy, looper):
     node = pre_vc_strategy.node
     pre_vc_strategy.view_changer.view_no = 1
@@ -145,6 +160,7 @@ def test_stash_not_3PC_msgs(pre_vc_strategy, looper):
     assert pre_vc_strategy.stashedNodeInBox.popleft() == m2
 
 
+@pytest.mark.skip(reason="we don't use strategy now")
 def test_the_same_order_as_in_NodeInBox_after_vc_continued(pre_vc_strategy):
     replica = pre_vc_strategy.replica
     pre_vc_strategy.view_changer.view_no = 1
@@ -159,6 +175,7 @@ def test_the_same_order_as_in_NodeInBox_after_vc_continued(pre_vc_strategy):
     assert pre_vc_strategy.node.nodeInBox.popleft() == m2
 
 
+@pytest.mark.skip(reason="we don't use strategy now")
 def test_is_preparing_to_False_after_vc_continue(pre_vc_strategy):
     replica = pre_vc_strategy.replica
     pre_vc_strategy.is_preparing = True
@@ -166,6 +183,7 @@ def test_is_preparing_to_False_after_vc_continue(pre_vc_strategy):
     assert pre_vc_strategy.is_preparing == False
 
 
+@pytest.mark.skip(reason="we don't use strategy now")
 def test_get_msgs_from_rxMsgs_queue(create_node_and_not_start, looper):
     node = create_node_and_not_start
     node.view_changer = create_view_changer(node)

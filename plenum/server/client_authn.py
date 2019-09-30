@@ -6,7 +6,7 @@ from typing import Dict, Optional, Sequence
 
 import base58
 from common.serializers.serialization import serialize_msg_for_signing
-from plenum.common.constants import VERKEY, ROLE, GET_TXN
+from plenum.common.constants import VERKEY, ROLE, GET_TXN, NYM, IDENTIFIER
 from plenum.common.exceptions import EmptySignature, \
     MissingSignature, EmptyIdentifier, \
     MissingIdentifier, CouldNotAuthenticate, \
@@ -14,11 +14,8 @@ from plenum.common.exceptions import EmptySignature, \
     InsufficientSignatures, InsufficientCorrectSignatures
 from plenum.common.types import f
 from plenum.common.verifier import DidVerifier, Verifier
-from plenum.server.action_req_handler import ActionReqHandler
-from plenum.server.config_req_handler import ConfigReqHandler
-from plenum.server.domain_req_handler import DomainRequestHandler
-from plenum.server.pool_req_handler import PoolRequestHandler
 from plenum.server.request_handlers.handler_interfaces.request_handler import RequestHandler
+from plenum.server.request_handlers.utils import get_nym_details, get_request_type, nym_ident_is_dest, get_target_verkey
 from stp_core.common.log import getlogger
 
 logger = getlogger()
@@ -88,35 +85,39 @@ class ClientAuthNr:
 class NaclAuthNr(ClientAuthNr):
 
     def authenticate_multi(self, msg: Dict, signatures: Dict[str, str],
-                           threshold: Optional[int]=None, verifier: Verifier=DidVerifier):
+                           threshold: Optional[int] = None, verifier: Verifier = DidVerifier):
+
         num_sigs = len(signatures)
         if threshold is not None:
             if num_sigs < threshold:
                 raise InsufficientSignatures(num_sigs, threshold)
         else:
             threshold = num_sigs
+
         correct_sigs_from = []
+        incorrect_signatures = {}
         for idr, sig in signatures.items():
             try:
-                sig = base58.b58decode(sig)
+                sig_decoded = base58.b58decode(sig)
             except Exception as ex:
                 raise InvalidSignatureFormat from ex
 
             ser = self.serializeForSig(msg, identifier=idr)
-            verkey = self.getVerkey(idr)
 
+            verkey = self.getVerkey(idr, msg)
             if verkey is None:
-                raise CouldNotAuthenticate(
-                    'Can not find verkey for {}'.format(idr))
+                raise CouldNotAuthenticate(idr)
 
             vr = verifier(verkey, identifier=idr)
-            if vr.verify(sig, ser):
+            if vr.verify(sig_decoded, ser):
                 correct_sigs_from.append(idr)
                 if len(correct_sigs_from) == threshold:
                     break
+            else:
+                incorrect_signatures[idr] = sig
         else:
-            raise InsufficientCorrectSignatures(len(correct_sigs_from),
-                                                threshold)
+            raise InsufficientCorrectSignatures(threshold, len(correct_sigs_from), incorrect_signatures)
+
         return correct_sigs_from
 
     @abstractmethod
@@ -124,7 +125,7 @@ class NaclAuthNr(ClientAuthNr):
         pass
 
     @abstractmethod
-    def getVerkey(self, identifier):
+    def getVerkey(self, ident, request):
         pass
 
     def serializeForSig(self, msg, identifier=None, topLevelKeysToIgnore=None):
@@ -142,6 +143,7 @@ class SimpleAuthNr(NaclAuthNr):
         # key: some identifier, value: verification key
         self.clients = {}  # type: Dict[str, Dict]
         self.state = state
+        self.specific_verkey_validation = {NYM: self.nym_specific_auth}
 
     def addIdr(self, identifier, verkey, role=None):
         if identifier in self.clients:
@@ -152,18 +154,20 @@ class SimpleAuthNr(NaclAuthNr):
             ROLE: role
         }
 
-    def getVerkey(self, identifier):
-        nym = self.clients.get(identifier)
+    def getVerkey(self, ident, request):
+        nym = self.clients.get(ident)
         if not nym:
             # Querying uncommitted identities since a batch might contain
             # both identity creation request and a request by that newly
             # created identity, also its possible to have multiple uncommitted
             # batches in progress and identity creation request might
             # still be in an earlier uncommited batch
-            nym = DomainRequestHandler.getNymDetails(
-                self.state, identifier, isCommitted=False)
+            nym = get_nym_details(self.state, ident, is_committed=False)
             if not nym:
-                raise UnknownIdentifier(identifier)
+                # If DID wasn't found in ledger and state, it might be
+                # non-ledger request, so we need to look for verkey in request
+                verkey = self.get_verkey_specific(request)
+                return verkey
         return nym.get(VERKEY)
 
     def authenticate(self,
@@ -173,6 +177,22 @@ class SimpleAuthNr(NaclAuthNr):
                      threshold: Optional[int] = None):
         signatures = {identifier: signature}
         return self.authenticate_multi(msg, signatures=signatures, threshold=threshold)
+
+    def get_verkey_specific(self, request):
+        typ = get_request_type(request)
+        verkey_validation = self.specific_verkey_validation.get(typ)
+        if verkey_validation is None:
+            return None
+        verkey = verkey_validation(request)
+        return verkey
+
+    def nym_specific_auth(self, request):
+        # As far as we allow non-ledger nyms send their own txn,
+        # we need to check if it's target verkey is correct
+        if nym_ident_is_dest(request):
+            return get_target_verkey(request)
+        else:
+            return None
 
 
 class CoreAuthMixin:
@@ -210,9 +230,9 @@ class CoreAuthMixin:
             raise EmptyIdentifier
         return msg[f.IDENTIFIER.nm]
 
-    def authenticate(self, req_data, identifier: Optional[str]=None,
-                     signature: Optional[str]=None, threshold: Optional[int] = None,
-                     verifier: Verifier=DidVerifier):
+    def authenticate(self, req_data, identifier: Optional[str] = None,
+                     signature: Optional[str] = None, threshold: Optional[int] = None,
+                     verifier: Verifier = DidVerifier):
         """
         Prepares the data to be serialised for signing and then verifies the
         signature

@@ -4,6 +4,7 @@ from plenum.common.metrics_collector import NullMetricsCollector
 from plenum.common.util import z85_to_friendly
 from stp_core.common.config.util import getConfig
 from stp_core.common.constants import CONNECTION_PREFIX, ZMQ_NETWORK_PROTOCOL
+from stp_zmq.client_message_provider import ClientMessageProvider
 
 try:
     import ujson as json
@@ -68,7 +69,7 @@ class ZStack(NetworkInterface):
     def __init__(self, name, ha, basedirpath, msgHandler, restricted=True,
                  seed=None, onlyListener=False, config=None, msgRejectHandler=None, queue_size=0,
                  create_listener_monitor=False, metrics=NullMetricsCollector(),
-                 mt_incoming_size=None, mt_outgoing_size=None):
+                 mt_incoming_size=None, mt_outgoing_size=None, timer=None):
         self._name = name
         self.ha = ha
         self.basedirpath = basedirpath
@@ -130,6 +131,12 @@ class ZStack(NetworkInterface):
         self._stashed_to_disconnected = {}
         self._stashed_pongs = set()
         self._received_pings = set()
+        self._client_message_provider = ClientMessageProvider(self.name,
+                                                              self.config,
+                                                              self.prepare_to_send,
+                                                              self.metrics,
+                                                              self.mt_outgoing_size,
+                                                              timer)
 
     def __defaultMsgRejectHandler(self, reason: str, frm):
         pass
@@ -355,6 +362,8 @@ class ZStack(NetworkInterface):
     def open(self):
         # noinspection PyUnresolvedReferences
         self.listener = self.ctx.socket(zmq.ROUTER)
+        self._client_message_provider.listener = self.listener
+        self.listener.setsockopt(zmq.ROUTER_MANDATORY, 1)
         if self.create_listener_monitor:
             self.listener_monitor = self.listener.get_monitor_socket()
         # noinspection PyUnresolvedReferences
@@ -364,13 +373,15 @@ class ZStack(NetworkInterface):
         self.listener.curve_publickey = public
         self.listener.curve_server = True
         self.listener.identity = self.publicKey
-        logger.debug(
+        logger.info(
             '{} will bind its listener at {}:{}'.format(self, self.ha[0], self.ha[1]))
         set_keepalive(self.listener, self.config)
         set_zmq_internal_queue_size(self.listener, self.queue_size)
         # Cycle to deal with "Address already in use" in case of immediate stack restart.
         bound = False
-        bind_retries = 0
+
+        sleep_between_bind_retries = 0.2
+        bind_retry_time = 0
         while not bound:
             try:
                 self.listener.bind(
@@ -379,10 +390,14 @@ class ZStack(NetworkInterface):
                 )
                 bound = True
             except zmq.error.ZMQError as zmq_err:
-                bind_retries += 1
-                if bind_retries == 50:
+                logger.warning("{} can not bind to {}:{}. Will try in {} secs.".
+                               format(self, self.ha[0], self.ha[1], sleep_between_bind_retries))
+                bind_retry_time += sleep_between_bind_retries
+                if bind_retry_time > self.config.MAX_WAIT_FOR_BIND_SUCCESS:
+                    logger.warning("{} can not bind to {}:{} for {} secs. Going to restart the service.".
+                                   format(self, self.ha[0], self.ha[1], self.config.MAX_WAIT_FOR_BIND_SUCCESS))
                     raise zmq_err
-                time.sleep(0.2)
+                time.sleep(sleep_between_bind_retries)
 
     def close(self):
         if self.listener_monitor is not None:
@@ -463,6 +478,12 @@ class ZStack(NetworkInterface):
 
     def _verifyAndAppend(self, msg, ident):
         try:
+            ident.decode()
+        except ValueError:
+            logger.error("Identifier {} is not decoded into UTF-8 string. "
+                         "Request will not be processed".format(ident))
+            return False
+        try:
             self.metrics.add_event(self.mt_incoming_size, len(msg))
             self.msgLenVal.validate(msg)
             decoded = msg.decode()
@@ -492,8 +513,10 @@ class ZStack(NetworkInterface):
                 incoming_size += len(msg)
                 i += 1
                 self._verifyAndAppend(msg, ident)
-            except zmq.Again:
+            except zmq.Again as e:
                 break
+            except zmq.ZMQError as e:
+                logger.debug("Strange ZMQ behaviour during node-to-node message receiving, experienced {}".format(e))
         if i > 0:
             logger.trace('{} got {} messages through listener'.
                          format(self, i))
@@ -520,9 +543,13 @@ class ZStack(NetworkInterface):
                         # Router probing sends empty message on connection
                         continue
                     i += 1
+                    logger.trace("{} received a message from remote {} by socket {} {}", self,
+                                 z85_to_friendly(ident), sock.FD, sock.underlying)
                     self._verifyAndAppend(msg, ident)
-                except zmq.Again:
+                except zmq.Again as e:
                     break
+                except zmq.ZMQError as e:
+                    logger.debug("Strange ZMQ behaviour during node-to-node message receiving, experienced {}".format(e))
             if i > 0:
                 logger.trace('{} got {} messages through remote {}'.
                              format(self, i, remote))
@@ -741,7 +768,8 @@ class ZStack(NetworkInterface):
 
     def send(self, msg: Any, remoteName: str = None, ha=None):
         if self.onlyListener:
-            return self.transmitThroughListener(msg, remoteName)
+            return self._client_message_provider.transmit_through_listener(msg,
+                                                                           remoteName)
         else:
             if remoteName is None:
                 r = []
@@ -800,31 +828,6 @@ class ZStack(NetworkInterface):
             err_str = '{}Cannot transmit message. Error {}'.format(CONNECTION_PREFIX, ex)
             logger.warning(err_str)
         return False, err_str
-
-    def transmitThroughListener(self, msg, ident) -> Tuple[bool, Optional[str]]:
-        if isinstance(ident, str):
-            ident = ident.encode()
-        try:
-            msg = self.prepare_to_send(msg)
-            # noinspection PyUnresolvedReferences
-            # self.listener.send_multipart([ident, self.signedMsg(msg)],
-            #                              flags=zmq.NOBLOCK)
-            logger.trace('{} transmitting {} to {} through listener socket'.
-                         format(self, msg, ident))
-            self.metrics.add_event(self.mt_outgoing_size, len(msg))
-            self.listener.send_multipart([ident, msg], flags=zmq.NOBLOCK)
-        except zmq.Again:
-            return False, None
-        except InvalidMessageExceedingSizeException as ex:
-            err_str = '{}Cannot transmit message. Error {}'.format(CONNECTION_PREFIX, ex)
-            logger.warning(err_str)
-            return False, err_str
-        except Exception as e:
-            err_str = '{}{} got error {} while sending through listener to {}' \
-                .format(CONNECTION_PREFIX, self, e, ident)
-            logger.warning(err_str)
-            return False, err_str
-        return True, None
 
     @staticmethod
     def serializeMsg(msg):

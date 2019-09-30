@@ -1,6 +1,7 @@
 import logging
 from typing import Tuple, List, Set
 
+from plenum.common.messages.internal_messages import NeedViewChange
 from plenum.common.startable import Mode
 from plenum.common.timer import QueueTimer
 from plenum.server.quorums import Quorums
@@ -38,8 +39,7 @@ class ViewChangerNodeDataProvider(ViewChangerDataProvider):
         return self._node.mode
 
     def next_primary_name(self) -> str:
-        return self._node.elector._next_primary_node_name_for_master(
-            self._node.nodeReg, self._node.nodeIds)
+        return self._node.get_primaries_for_current_view()[0]
 
     def current_primary_name(self) -> str:
         return self._node.master_primary_name
@@ -92,9 +92,28 @@ class ViewChangerNodeDataProvider(ViewChangerDataProvider):
     def discard(self, msg, reason, logMethod=logging.error, cliOutput=False):
         self._node.discard(msg, reason, logMethod, cliOutput)
 
+    def set_view_change_status(self, value: bool):
+        self._node.set_view_change_status(value)
+
     @property
     def node_status_db(self) -> KeyValueStorage:
         return self._node.nodeStatusDB
+
+    def view_setting_handler(self, view_no):
+        self._node.set_view_for_replicas(view_no)
+
+    def schedule_resend_inst_chng(self):
+        self._node.schedule_view_change_completion_check(self._node.config.INSTANCE_CHANGE_RESEND_TIMEOUT)
+
+    def start_view_change(self, proposed_view_no: int):
+        for replica in self._node.replicas.values():
+            replica.internal_bus.send(NeedViewChange(view_no=proposed_view_no))
+
+    def view_no(self):
+        return self._node.master_replica.viewNo
+
+    def view_change_in_progress(self):
+        return self._node.master_replica._consensus_data.waiting_for_new_view
 
 
 def create_view_changer(node, vchCls=ViewChanger):

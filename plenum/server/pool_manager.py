@@ -192,6 +192,8 @@ class TxnPoolManager(PoolManager, TxnStackManager):
             _updateNode(txn_data)
             self._set_node_services_in_cache(nodeNym, txn_data[DATA].get(SERVICES, None))
 
+        self.set_validators_for_replicas()
+
     def addNewNodeAndConnect(self, txn_data):
         nodeName = txn_data[DATA][ALIAS]
         if nodeName == self.name:
@@ -391,6 +393,14 @@ class TxnPoolManager(PoolManager, TxnStackManager):
         return [nym for nym, name in node_ids.items()
                 if name in node_reg]
 
+    def node_names_ordered_by_rank(self) -> List:
+        return self.calc_node_names_ordered_by_rank(self.nodeReg, self._ordered_node_ids)
+
+    @staticmethod
+    def calc_node_names_ordered_by_rank(node_reg, node_ids) -> List:
+        return [name for nym, name in node_ids.items()
+                if name in node_reg]
+
     def get_rank_of(self, node_id, node_reg, node_ids) -> Optional[int]:
         if self.id is None:
             # This can happen if a non-genesis node starts
@@ -415,3 +425,12 @@ class TxnPoolManager(PoolManager, TxnStackManager):
             if name == node_name:
                 return nym
         return None
+
+    def set_validators_for_replicas(self):
+        for r in self.node.replicas.values():
+            # We set new list of validators for every replica,
+            # cause cdp for every replica need to be independent
+            r.set_validators(self.node_names_ordered_by_rank())
+
+    def get_node_ids(self):
+        return self._ordered_node_ids

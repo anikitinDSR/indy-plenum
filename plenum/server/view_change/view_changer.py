@@ -5,15 +5,14 @@ from typing import List, Optional, Tuple, Set
 from functools import partial
 
 from common.exceptions import LogicError
+from plenum.common.event_bus import InternalBus
 from plenum.common.startable import Mode
 from plenum.common.timer import TimerService, RepeatingTimer
 from plenum.server.quorums import Quorums
 from plenum.server.view_change.instance_change_provider import InstanceChangeProvider
 from storage.kv_store import KeyValueStorage
 from stp_core.common.log import getlogger
-from stp_core.ratchet import Ratchet
 
-from plenum.common.throttler import Throttler
 from plenum.common.constants import PRIMARY_SELECTION_PREFIX, \
     VIEW_CHANGE_PREFIX, MONITORING_PREFIX
 from plenum.common.messages.node_messages import InstanceChange, ViewChangeDone, FutureViewChangeDone
@@ -130,6 +129,30 @@ class ViewChangerDataProvider(ABC):
     def node_status_db(self) -> Optional[KeyValueStorage]:
         pass
 
+    @abstractmethod
+    def view_setting_handler(self, view_no):
+        pass
+
+    @abstractmethod
+    def schedule_resend_inst_chng(self):
+        pass
+
+    @abstractmethod
+    def set_view_change_status(self, value: bool):
+        pass
+
+    @abstractmethod
+    def start_view_change(self, proposed_view_no: int):
+        pass
+
+    @abstractmethod
+    def view_no(self):
+        pass
+
+    @abstractmethod
+    def view_change_in_progress(self):
+        pass
+
 
 class ViewChanger():
 
@@ -137,8 +160,6 @@ class ViewChanger():
         self.provider = provider
         self._timer = timer
         self.pre_vc_strategy = None
-
-        self._view_no = 0  # type: int
 
         self.inBox = deque()
         self.outBox = deque()
@@ -158,15 +179,12 @@ class ViewChanger():
         # between.
         self._next_view_indications = {}
 
-        self._view_change_in_progress = False
         self.pre_view_change_in_progress = False
 
         self.previous_view_no = None
         self.previous_master_primary = None
 
         self.set_defaults()
-
-        self.initInsChngThrottling()
 
         # Action for _schedule instanceChange messages
         self.instance_change_action = None
@@ -199,12 +217,7 @@ class ViewChanger():
 
     @property
     def view_no(self):
-        return self._view_no
-
-    @view_no.setter
-    def view_no(self, value):
-        logger.info("{} setting view no to {}".format(self.name, value))
-        self._view_no = value
+        return self.provider.view_no()
 
     @property
     def name(self) -> str:
@@ -220,11 +233,7 @@ class ViewChanger():
 
     @property
     def view_change_in_progress(self) -> bool:
-        return self._view_change_in_progress
-
-    @view_change_in_progress.setter
-    def view_change_in_progress(self, value: bool):
-        self._view_change_in_progress = value
+        return self.provider.view_change_in_progress()
 
     @property
     def quorum(self) -> int:
@@ -340,6 +349,7 @@ class ViewChanger():
 
     def on_view_change_not_completed_in_time(self):
         self.propose_view_change(Suspicions.INSTANCE_CHANGE_TIMEOUT)
+        self.provider.schedule_resend_inst_chng()
 
     def on_replicas_count_changed(self):
         self.propose_view_change(Suspicions.REPLICAS_COUNT_CHANGED)
@@ -347,8 +357,8 @@ class ViewChanger():
     def on_catchup_complete(self):
         if not self.provider.is_node_synced():
             raise LogicError('on_catchup_complete can be called only after catchup completed')
-        if not self.provider.is_primary() is None:
-            raise LogicError('Primary on master replica cannot be elected yet')
+        # if not self.provider.is_primary() is None:
+        #     raise LogicError('Primary on master replica cannot be elected yet')
         self._send_view_change_done_message()
         self._start_selection()
 
@@ -484,31 +494,22 @@ class ViewChanger():
         # `ViewChangeWindowSize` seconds or the last sent instance change
         # message was sent long enough ago then instance change message can be
         # sent otherwise no.
-        canSendInsChange, cooldown = self.insChngThrottler.acquire()
-        if canSendInsChange:
-            logger.info(
-                "{}{} sending an instance change with view_no {}"
-                " since {}".format(
-                    VIEW_CHANGE_PREFIX,
-                    self,
-                    view_no,
-                    suspicion.reason))
-            logger.info("{}{} metrics for monitor: {}"
-                        .format(MONITORING_PREFIX, self,
-                                self.provider.pretty_metrics()))
-            msg = self._create_instance_change_msg(view_no, suspicion.code)
-            self.send(msg)
-            # record instance change vote for self and try to change the view
-            # if quorum is reached
-            self._on_verified_instance_change_msg(msg, self.name)
-        else:
-            logger.info("{} cannot send instance change sooner then {} seconds".format(self, cooldown))
 
-    # noinspection PyAttributeOutsideInit
-    def initInsChngThrottling(self):
-        windowSize = self.config.ViewChangeWindowSize
-        ratchet = Ratchet(a=2, b=0.05, c=1, base=2, peak=windowSize)
-        self.insChngThrottler = Throttler(windowSize, ratchet.get, self._timer.get_current_time)
+        logger.info(
+            "{}{} sending an instance change with view_no {}"
+            " since {}".format(
+                VIEW_CHANGE_PREFIX,
+                self,
+                view_no,
+                suspicion.reason))
+        logger.info("{}{} metrics for monitor: {}"
+                    .format(MONITORING_PREFIX, self,
+                            self.provider.pretty_metrics()))
+        msg = self._create_instance_change_msg(view_no, suspicion.code)
+        self.send(msg)
+        # record instance change vote for self and try to change the view
+        # if quorum is reached
+        self._on_verified_instance_change_msg(msg, self.name)
 
     def _create_instance_change_msg(self, view_no, suspicion_code):
         return InstanceChange(view_no, suspicion_code)
@@ -566,29 +567,13 @@ class ViewChanger():
 
         :param proposed_view_no: the new view number after view change.
         """
-        # TODO: consider moving this to pool manager
-        # TODO: view change is a special case, which can have different
-        # implementations - we need to make this logic pluggable
-
-        if self.pre_vc_strategy and (not continue_vc):
-            self.pre_view_change_in_progress = True
-            self.pre_vc_strategy.prepare_view_change(proposed_view_no)
-            return
-        elif self.pre_vc_strategy:
-            self.pre_vc_strategy.on_strategy_complete()
-
         self.previous_view_no = self.view_no
-        self.view_no = proposed_view_no
         self.pre_view_change_in_progress = False
-        self.view_change_in_progress = True
         self.previous_master_primary = self.provider.current_primary_name()
         self.set_defaults()
-        self._process_vcd_for_future_view()
-
-        self.initInsChngThrottling()
 
         self.provider.notify_view_change_start()
-        self.provider.start_catchup()
+        self.provider.start_view_change(proposed_view_no)
 
     def _process_vcd_for_future_view(self):
         # make sure that all received VCD messages for future view
@@ -643,17 +628,17 @@ class ViewChanger():
 
         self.provider.select_primaries()
 
-        if self.view_change_in_progress:
-            self.view_change_in_progress = False
-            self.provider.notify_view_change_complete()
-            # when we had INSTANCE_CHANGE message, they added into instanceChanges
-            # by msg.view_no. When view change was occured and view_no is changed,
-            # then we should delete all INSTANCE_CHANGE messages with current (already changed)
-            # view_no (which used in corresponded INSTANCE_CHANGE messages)
-            # Therefore we delete all INSTANCE_CHANGE messages from previous and current view number
-            self.instance_changes.remove_view(self.view_no)
-            self.previous_view_no = None
-            self.previous_master_primary = None
+        # if self.view_change_in_progress:
+        #     self.view_change_in_progress = False
+        #     self.provider.notify_view_change_complete()
+        #     # when we had INSTANCE_CHANGE message, they added into instanceChanges
+        #     # by msg.view_no. When view change was occured and view_no is changed,
+        #     # then we should delete all INSTANCE_CHANGE messages with current (already changed)
+        #     # view_no (which used in corresponded INSTANCE_CHANGE messages)
+        #     # Therefore we delete all INSTANCE_CHANGE messages from previous and current view number
+        #     self.instance_changes.remove_view(self.view_no)
+        #     self.previous_view_no = None
+        #     self.previous_master_primary = None
 
     def set_defaults(self):
         # Tracks view change done message

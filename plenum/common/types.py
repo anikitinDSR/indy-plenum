@@ -1,5 +1,5 @@
 from collections import namedtuple
-from typing import NamedTuple, Any, List, Mapping, Optional, Dict
+from typing import NamedTuple, Any, List, Mapping, Optional, Dict, Tuple
 
 from stp_core.types import HA
 from plenum.common.constants import (
@@ -25,6 +25,7 @@ class f:  # provides a namespace for reusable field constants
     TIE_AMONG = Field("tieAmong", List[str])
     ROUND = Field("round", int)
     IDENTIFIER = Field('identifier', str)
+    ENDORSER = Field('endorser', str)
     DIGEST = Field('digest', str)
     PAYLOAD_DIGEST = Field('payloadDigest', str)
     DIGESTS = Field('digests', List[str])
@@ -41,6 +42,7 @@ class f:  # provides a namespace for reusable field constants
     SENDER_NODE = Field('senderNode', str)
     REQ_ID = Field('reqId', int)
     VIEW_NO = Field('viewNo', int)
+    ORIGINAL_VIEW_NO = Field('originalViewNo', int)
     LEDGER_INFO = Field("ledgerInfo", List[tuple])
     INST_ID = Field('instId', int)
     IS_STABLE = Field('isStable', bool)
@@ -61,7 +63,9 @@ class f:  # provides a namespace for reusable field constants
     AUDIT_TXN_ROOT_HASH = Field("auditTxnRootHash", str)
     TXN_ROOT = Field("txnRootHash", str)
     BLS_SIG = Field("blsSig", str)
+    BLS_SIGS = Field("blsSigs", Dict[int, str])
     BLS_MULTI_SIG = Field("blsMultiSig", str)
+    BLS_MULTI_SIGS = Field("blsMultiSigs", str)
     BLS_MULTI_SIG_STATE_ROOT = Field("blsMultiSigStateRoot", str)
     MERKLE_ROOT = Field("merkleRoot", str)
     OLD_MERKLE_ROOT = Field("oldMerkleRoot", str)
@@ -95,19 +99,20 @@ class f:  # provides a namespace for reusable field constants
     TAA_ACCEPTANCE_TIME = Field("time", float)
     # View change
     STABLE_CHECKPOINT = Field("stableCheckpoint", int)
-    PREPARED = Field("prepared", List)           # list of PrePrepare
-    PREPREPARED = Field("preprepared", List)     # list of PrePrepare
-    CHECKPOINTS = Field("checkpoints", List)     # list of Checkpoint
-    VIEW_CHANGES = Field("viewChanges", List)    # list of tuples(name, digest)
-    CHECKPOINT = Field("checkpoint", Any)        # instance of Checkpoint
-    PREPREPARES = Field("preprepares", List)     # list of PrePrepare
+    PREPARED = Field("prepared", List[Tuple[int, int, int, str]])         # view_no, pp_view_no, pp_seq_no, pp_digest
+    PREPREPARED = Field("preprepared", List[Tuple[int, int, int, str]])   # view_no, pp_view_no, pp_seq_no, pp_digest
+    BATCH_IDS = Field("batch_ids", List[Tuple[int, int, int, str]])  # view_no, pp_view_no, pp_seq_no, pp_digest
+    PREPREPARES = Field("preprepares", Any)                          # Any == PrePrepare
+    CHECKPOINTS = Field("checkpoints", List[Any])                    # Any == Checkpoint
+    VIEW_CHANGES = Field("viewChanges", List[Tuple[str, str]])       # name, vc_digest
+    CHECKPOINT = Field("checkpoint", Any)                            # Any == Checkpoint
+    BATCHES = Field("batches", List[Tuple[int, int, str]])           # view_no, pp_seq_no, pp_digest
 
 
 OPERATION = 'operation'
 
 
 PLUGIN_TYPE_VERIFICATION = "VERIFICATION"
-PLUGIN_TYPE_PROCESSING = "PROCESSING"
 PLUGIN_TYPE_STATS_CONSUMER = "STATS_CONSUMER"
 PLUGIN_TYPE_AUTHENTICATOR = 'AUTHENTICATOR'
 

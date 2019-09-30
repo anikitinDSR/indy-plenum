@@ -10,7 +10,7 @@ import json
 from contextlib import ExitStack
 from functools import partial
 import time
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 from indy.pool import create_pool_ledger_config, open_pool_ledger, close_pool_ledger
 from indy.wallet import create_wallet, open_wallet, close_wallet
@@ -34,6 +34,7 @@ from plenum.test.greek import genNodeNames
 from plenum.test.grouped_load_scheduling import GroupedLoadScheduling
 from plenum.test.node_catchup.helper import waitNodeDataEquality, check_last_3pc_master
 from plenum.test.pool_transactions.helper import sdk_add_new_nym, sdk_pool_refresh, sdk_add_new_steward_and_node
+from plenum.test.simulation.sim_random import DefaultSimRandom
 from plenum.test.spy_helpers import getAllReturnVals
 from plenum.test.view_change.helper import ensure_view_change
 from stp_core.common.logging.handlers import TestingHandler
@@ -57,7 +58,7 @@ from plenum.test.helper import checkLastClientReqForNode, \
     waitForViewChange, requestReturnedToNode, randomText, \
     mockGetInstalledDistributions, mockImportModule, chk_all_funcs, \
     create_new_test_node, sdk_json_to_request_object, sdk_send_random_requests, \
-    sdk_get_and_check_replies, sdk_set_protocol_version, sdk_send_random_and_check
+    sdk_get_and_check_replies, sdk_set_protocol_version, sdk_send_random_and_check, MockTimer, create_pool_txn_data
 from plenum.test.node_request.node_request_helper import checkPrePrepared, \
     checkPropagated, checkPrepared, checkCommitted
 from plenum.test.plugin.helper import getPluginPath
@@ -215,8 +216,9 @@ def getValueFromModule(request, name: str, default: Any = None):
                     format(name, value))
     else:
         value = default if default is not None else None
-        logger.info("no {} found in the module, using the default: {}".
-                    format(name, value))
+        # TODO: Default reports are spamming logs when lots of tests are running
+        # logger.info("no {} found in the module, using the default: {}".
+        #             format(name, value))
     return value
 
 
@@ -582,78 +584,13 @@ def dirName():
 
 @pytest.fixture(scope="module")
 def poolTxnData(request):
-    nodeCount = getValueFromModule(request, "nodeCount", 4)
-    nodes_with_bls = getValueFromModule(request, "nodes_wth_bls", nodeCount)
-    data = {'txns': [], 'seeds': {}, 'nodesWithBls': {}}
-    for i, node_name in zip(range(1, nodeCount + 1), genNodeNames(nodeCount)):
-        data['seeds'][node_name] = node_name + '0' * (32 - len(node_name))
-        steward_name = 'Steward' + str(i)
-        data['seeds'][steward_name] = steward_name + \
-                                      '0' * (32 - len(steward_name))
-
-        n_idr = SimpleSigner(seed=data['seeds'][node_name].encode()).identifier
-        s_idr = DidSigner(seed=data['seeds'][steward_name].encode())
-
-        data['txns'].append(
-                Member.nym_txn(nym=s_idr.identifier,
-                               verkey=s_idr.verkey,
-                               role=STEWARD,
-                               name=steward_name,
-                               seq_no=i)
-        )
-
-        node_txn = Steward.node_txn(steward_nym=s_idr.identifier,
-                                    node_name=node_name,
-                                    nym=n_idr,
-                                    ip='127.0.0.1',
-                                    node_port=genHa()[1],
-                                    client_port=genHa()[1],
-                                    client_ip='127.0.0.1',
-                                    services=[VALIDATOR],
-                                    seq_no=i)
-
-        if i <= nodes_with_bls:
-            _, bls_key, bls_key_proof = create_default_bls_crypto_factory().generate_bls_keys(
-                seed=data['seeds'][node_name])
-            get_payload_data(node_txn)[DATA][BLS_KEY] = bls_key
-            get_payload_data(node_txn)[DATA][BLS_KEY_PROOF] = bls_key_proof
-            data['nodesWithBls'][node_name] = True
-
-        data['txns'].append(node_txn)
-
-    # Add 4 Trustees
-    for i in range(4):
-        trustee_name = 'Trs' + str(i)
-        data['seeds'][trustee_name] = trustee_name + '0' * (
-                32 - len(trustee_name))
-        t_sgnr = DidSigner(seed=data['seeds'][trustee_name].encode())
-        data['txns'].append(
-            Member.nym_txn(nym=t_sgnr.identifier,
-                           verkey=t_sgnr.verkey,
-                           role=TRUSTEE,
-                           name=trustee_name)
-        )
-
-    more_data_seeds = \
-        {
-            "Alice": "99999999999999999999999999999999",
-            "Jason": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            "John": "dddddddddddddddddddddddddddddddd",
-            "Les": "ffffffffffffffffffffffffffffffff"
-        }
-    more_data_users = []
-    for more_name, more_seed in more_data_seeds.items():
-        signer = DidSigner(seed=more_seed.encode())
-        more_data_users.append(
-            Member.nym_txn(nym=signer.identifier,
-                           verkey=signer.verkey,
-                           name=more_name,
-                           creator="5rArie7XKukPCaEwq5XGQJnM9Fc5aZE3M9HAPVfMU2xC")
-        )
-
-    data['txns'].extend(more_data_users)
-    data['seeds'].update(more_data_seeds)
-    return data
+    node_count = getValueFromModule(request, "nodeCount", 4)
+    nodes_with_bls = getValueFromModule(request, "nodes_wth_bls", node_count)
+    node_names = genNodeNames(node_count)
+    return create_pool_txn_data(node_names=node_names,
+                                crypto_factory=create_default_bls_crypto_factory(),
+                                get_free_port=lambda: genHa()[1],
+                                nodes_with_bls=nodes_with_bls)
 
 
 @pytest.fixture(scope="module")
@@ -1186,3 +1123,38 @@ def sdk_new_node_caught_up(txnPoolNodeSet,
                 new_node.num_txns_caught_up_in_last_catchup)) > 0
 
     return new_node
+
+
+@pytest.fixture(params=range(100))
+def random(request):
+    return DefaultSimRandom(request.param)
+
+
+@pytest.fixture(params=[0, 1576800000.0])
+def initial_time(request):
+    return request.param
+
+
+@pytest.fixture
+def mock_timer(initial_time):
+    return MockTimer(initial_time)
+
+
+def _select_item_except(index, population, exclude: List = []):
+    limited_population = [item for item in population if item not in exclude]
+    return limited_population[index]
+
+
+@pytest.fixture(params=[0, 1, -1])
+def some_item(request):
+    return partial(_select_item_except, request.param)
+
+
+@pytest.fixture(params=[0, 1, -1])
+def other_item(request):
+    return partial(_select_item_except, request.param)
+
+
+@pytest.fixture(params=[0, 1, -1])
+def another_item(request):
+    return partial(_select_item_except, request.param)

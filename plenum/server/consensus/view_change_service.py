@@ -1,32 +1,30 @@
-from _sha256 import sha256
-from collections import defaultdict
 from functools import partial
 from operator import itemgetter
-from typing import List, Optional, Union, Dict, Any, Tuple
+from typing import List, Optional, Union, Dict, Any
 
-from common.serializers.json_serializer import JsonSerializer
 from plenum.common.config_util import getConfig
-from plenum.common.constants import VIEW_CHANGE
+from plenum.common.constants import VIEW_CHANGE, PRIMARY_SELECTION_PREFIX, NEW_VIEW
 from plenum.common.event_bus import InternalBus, ExternalBus
-from plenum.common.messages.internal_messages import NeedViewChange, NewViewAccepted, ViewChangeStarted, MissingMessage
+from plenum.common.messages.internal_messages import NeedViewChange, NewViewAccepted, ViewChangeStarted, MissingMessage, \
+    StartViewChange
 from plenum.common.messages.node_messages import ViewChange, ViewChangeAck, NewView, Checkpoint, InstanceChange
 from plenum.common.router import Subscription
+from plenum.common.startable import Mode
 from plenum.common.stashing_router import StashingRouter, DISCARD, PROCESS
 from plenum.common.timer import TimerService, RepeatingTimer
 from plenum.server.consensus.consensus_shared_data import ConsensusSharedData
 from plenum.server.consensus.batch_id import BatchID
-from plenum.server.consensus.primary_selector import RoundRobinPrimariesSelector
+from plenum.server.consensus.primary_selector import PrimariesSelector
 from plenum.server.consensus.view_change_storages import view_change_digest
-from plenum.server.quorums import Quorums
 from plenum.server.replica_helper import generateName, getNodeName
-from plenum.server.replica_validator_enums import STASH_VIEW
+from plenum.server.replica_validator_enums import STASH_WAITING_VIEW_CHANGE, STASH_CATCH_UP
 from plenum.server.suspicion_codes import Suspicions
 from stp_core.common.log import getlogger
 
 
 class ViewChangeService:
     def __init__(self, data: ConsensusSharedData, timer: TimerService, bus: InternalBus, network: ExternalBus,
-                 stasher: StashingRouter):
+                 stasher: StashingRouter, primaries_selector: PrimariesSelector):
         self._config = getConfig()
         self._logger = getlogger()
 
@@ -36,23 +34,30 @@ class ViewChangeService:
         self._bus = bus
         self._network = network
         self._router = stasher
-        self._new_view = None  # type: Optional[NewView]
+
+        # Last successful viewNo.
+        # In some cases view_change process can be uncompleted in time.
+        # In that case we want to know, which viewNo was successful (last completed view_change)
+        self.last_completed_view_no = self._data.view_no
+
         self._resend_inst_change_timer = RepeatingTimer(self._timer,
                                                         self._config.NEW_VIEW_TIMEOUT,
-                                                        partial(self._propose_view_change,
-                                                                Suspicions.INSTANCE_CHANGE_TIMEOUT.code),
+                                                        partial(self._propose_view_change_not_complete_in_time),
                                                         active=False)
-
-        self._router.subscribe(ViewChange, self.process_view_change_message)
-        self._router.subscribe(ViewChangeAck, self.process_view_change_ack_message)
-        self._router.subscribe(NewView, self.process_new_view_message)
 
         self._old_prepared = {}  # type: Dict[int, BatchID]
         self._old_preprepared = {}  # type: Dict[int, List[BatchID]]
-        self._primaries_selector = RoundRobinPrimariesSelector()
+        self._stashed_vc_msgs = {}  # type: Dict[int, int]
+        self._primaries_selector = primaries_selector
 
         self._subscription = Subscription()
+        self._subscription.subscribe(self._router, ViewChange, self.process_view_change_message)
+        self._subscription.subscribe(self._router, ViewChangeAck, self.process_view_change_ack_message)
+        self._subscription.subscribe(self._router, NewView, self.process_new_view_message)
         self._subscription.subscribe(self._bus, NeedViewChange, self.process_need_view_change)
+
+    def cleanup(self):
+        self._subscription.unsubscribe_all()
 
     def __repr__(self):
         return self._data.name
@@ -75,18 +80,26 @@ class ViewChangeService:
         # 3. Update shared data
         self._data.view_no = view_no
         self._data.waiting_for_new_view = True
-        self._data.primaries = self._primaries_selector.select_primaries(view_no=self._data.view_no,
-                                                                         instance_count=self._data.quorums.f + 1,
-                                                                         validators=self._data.validators)
+        self._data.primaries = self._primaries_selector.select_primaries(view_no=self._data.view_no)
+        for i, primary_name in enumerate(self._data.primaries):
+            self._logger.display("{} selected primary {} for instance {} (view {})"
+                                 .format(PRIMARY_SELECTION_PREFIX,
+                                         primary_name, i, self._data.view_no),
+                                 extra={"cli": "ANNOUNCE",
+                                        "tags": ["node-election"]})
+
+        old_primary = self._data.primary_name
         self._data.primary_name = generateName(self._data.primaries[self._data.inst_id], self._data.inst_id)
 
         if not self._data.is_master:
-            self._data.waiting_for_new_view = False
-            self._bus.send(NewViewAccepted(view_no=view_no,
-                                           view_changes=None,
-                                           checkpoint=None,
-                                           batches=None))
             return
+
+        if old_primary and self._data.primary_name == old_primary:
+            self._logger.info("Selected master primary is the same with the "
+                              "current master primary (new_view {}). "
+                              "Propose a new view {}".format(self._data.view_no,
+                                                             self._data.view_no + 1))
+            self._propose_view_change(Suspicions.INCORRECT_NEW_PRIMARY.code)
 
         # 4. Build ViewChange message
         vc = self._build_view_change_msg()
@@ -99,10 +112,11 @@ class ViewChangeService:
         self._network.send(vc)
         self.view_change_votes.add_view_change(vc, self._data.name)
 
-        # 6. Unstash messages for new view
-        self._router.process_all_stashed(STASH_VIEW)
+        # 7. Unstash messages for view change
+        self._router.process_all_stashed(STASH_WAITING_VIEW_CHANGE)
+        self._stashed_vc_msgs.clear()
 
-        # 7. Restart instance change timer
+        # 8. Restart instance change timer
         self._resend_inst_change_timer.stop()
         self._resend_inst_change_timer.start()
 
@@ -110,7 +124,7 @@ class ViewChangeService:
         self._clear_old_batches(self._old_prepared)
         self._clear_old_batches(self._old_preprepared)
         self.view_change_votes.clear()
-        self._new_view = None
+        self._data.new_view = None
 
     def _clear_old_batches(self, batches: Dict[int, Any]):
         for pp_seq_no in list(batches.keys()):
@@ -140,6 +154,12 @@ class ViewChangeService:
 
     def process_view_change_message(self, msg: ViewChange, frm: str):
         result = self._validate(msg, frm)
+        if result == STASH_WAITING_VIEW_CHANGE:
+            self._stashed_vc_msgs.setdefault(msg.viewNo, 0)
+            self._stashed_vc_msgs[msg.viewNo] += 1
+            if self._data.quorums.view_change.is_reached(self._stashed_vc_msgs[msg.viewNo]) and \
+                    not self._data.waiting_for_new_view:
+                self._bus.send(StartViewChange(msg.viewNo))
         if result != PROCESS:
             return result, None
 
@@ -196,7 +216,7 @@ class ViewChangeService:
             )
             return DISCARD, "New View from non-Primary"
 
-        self._new_view = msg
+        self._data.new_view = msg
         self._finish_view_change_if_needed()
         return PROCESS, None
 
@@ -212,7 +232,7 @@ class ViewChangeService:
             return DISCARD
 
         if msg.viewNo > self._data.view_no:
-            return STASH_VIEW
+            return STASH_WAITING_VIEW_CHANGE
 
         return PROCESS
 
@@ -230,6 +250,9 @@ class ViewChangeService:
         if batches is None:
             return
 
+        if cp not in self._data.checkpoints:
+            return
+
         nv = NewView(
             viewNo=self._data.view_no,
             viewChanges=sorted(confirmed_votes, key=itemgetter(0)),
@@ -238,15 +261,15 @@ class ViewChangeService:
         )
         self._logger.info("{} sending {}".format(self, nv))
         self._network.send(nv)
-        self._new_view = nv
+        self._data.new_view = nv
         self._finish_view_change()
 
     def _finish_view_change_if_needed(self):
-        if self._new_view is None:
+        if self._data.new_view is None:
             return
 
         view_changes = []
-        for name, vc_digest in self._new_view.viewChanges:
+        for name, vc_digest in self._data.new_view.viewChanges:
             vc = self.view_change_votes.get_view_change(name, vc_digest)
             # We don't have needed ViewChange, so we cannot validate NewView
             if vc is None:
@@ -255,11 +278,11 @@ class ViewChangeService:
             view_changes.append(vc)
 
         cp = self._new_view_builder.calc_checkpoint(view_changes)
-        if cp is None or cp != self._new_view.checkpoint:
+        if cp is None or cp != self._data.new_view.checkpoint:
             # New primary is malicious
             self._logger.info(
                 "{} Received invalid NewView {} for view {}: expected checkpoint {}".format(self._data.name,
-                                                                                            self._new_view,
+                                                                                            self._data.new_view,
                                                                                             self._data.view_no,
                                                                                             cp)
             )
@@ -267,11 +290,11 @@ class ViewChangeService:
             return
 
         batches = self._new_view_builder.calc_batches(cp, view_changes)
-        if batches != self._new_view.batches:
+        if batches != self._data.new_view.batches:
             # New primary is malicious
             self._logger.info(
                 "{} Received invalid NewView {} for view {}: expected batches {}".format(self._data.name,
-                                                                                         self._new_view,
+                                                                                         self._data.new_view,
                                                                                          self._data.view_no,
                                                                                          batches)
             )
@@ -281,25 +304,45 @@ class ViewChangeService:
         self._finish_view_change()
 
     def _finish_view_change(self):
+        self._logger.info("{} finished view change to view {}. Primaries: {}".format(self._data.name,
+                                                                                     self._data.view_no,
+                                                                                     self._data.primaries))
         # Update shared data
         self._data.waiting_for_new_view = False
-        self._data.prev_view_prepare_cert = self._new_view.batches[-1].pp_seq_no if self._new_view.batches else None
+        self._data.prev_view_prepare_cert = self._data.new_view.batches[-1].pp_seq_no \
+            if self._data.new_view.batches else 0
 
         # Cancel View Change timeout task
         self._resend_inst_change_timer.stop()
-
         # send message to other services
-        self._bus.send(NewViewAccepted(view_no=self._new_view.viewNo,
-                                       view_changes=self._new_view.viewChanges,
-                                       checkpoint=self._new_view.checkpoint,
-                                       batches=self._new_view.batches))
+        self._bus.send(NewViewAccepted(view_no=self._data.new_view.viewNo,
+                                       view_changes=self._data.new_view.viewChanges,
+                                       checkpoint=self._data.new_view.checkpoint,
+                                       batches=self._data.new_view.batches))
+        self.last_completed_view_no = self._data.view_no
+
+    def _propose_view_change_not_complete_in_time(self):
+        self._propose_view_change(Suspicions.INSTANCE_CHANGE_TIMEOUT.code)
+        if self._data.new_view is None:
+            self._request_new_view_message(self._data.view_no)
 
     def _propose_view_change(self, suspision_code):
-        proposed_view_no = self._data.view_no + 1
+        proposed_view_no = self._data.view_no
+        # TODO: For some reason not incrementing view_no in most cases leads to lots of failing/flaky tests
+        # if suspicion == Suspicions.INSTANCE_CHANGE_TIMEOUT or not self.view_change_in_progress:
+        if suspision_code != Suspicions.STATE_SIGS_ARE_NOT_UPDATED or not self._data.waiting_for_new_view:
+            proposed_view_no += 1
         self._logger.info("{} proposing a view change to {} with code {}".
                           format(self, proposed_view_no, suspision_code))
         msg = InstanceChange(proposed_view_no, suspision_code)
         self._network.send(msg)
+
+    def _request_new_view_message(self, view_no):
+        self._bus.send(MissingMessage(msg_type=NEW_VIEW,
+                                      key=view_no,
+                                      inst_id=self._data.inst_id,
+                                      dst=[getNodeName(self._data.primary_name)],
+                                      stash_data=None))
 
     def _request_view_change_message(self, key):
         self._bus.send(MissingMessage(msg_type=VIEW_CHANGE,
@@ -329,8 +372,13 @@ class NewViewBuilder:
                     continue
 
                 # Don't add checkpoint to pretending ones if not enough nodes have it
+                # TODO: PBFT paper (for example Fig.4 in https://www.microsoft.com/en-us/research/wp-content/uploads/2017/01/p398-castro-bft-tocs.pdf)
+                # assumes a weak certificate here.
+                # But they also assume a need of catch-up before processing NewView if a Replica doesn't have the calculated checkpoint yet
+                # It looks like using a strong certificate eliminates a need for cathcup (although re-ordering may be slower)
+                # Once https://jira.hyperledger.org/browse/INDY-2237 is done, we may come back to weak certificate here
                 have_checkpoint = [vc for vc in vcs if cur_cp in vc.checkpoints]
-                if not self._data.quorums.weak.is_reached(len(have_checkpoint)):
+                if not self._data.quorums.strong.is_reached(len(have_checkpoint)):
                     continue
 
                 # All checks passed, this is a valid candidate checkpoint

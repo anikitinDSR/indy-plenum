@@ -12,16 +12,12 @@ from stp_core.loop.eventually import eventually
 
 @pytest.fixture(scope="module")
 def tconf(tconf):
-    old_catchup_timeout = tconf.MIN_TIMEOUT_CATCHUPS_DONE_DURING_VIEW_CHANGE
-    old_view_change_timeout = tconf.VIEW_CHANGE_TIMEOUT
-    tconf.MIN_TIMEOUT_CATCHUPS_DONE_DURING_VIEW_CHANGE = 15
-    tconf.VIEW_CHANGE_TIMEOUT = 30
+    old_view_change_timeout = tconf.NEW_VIEW_TIMEOUT
+    tconf.NEW_VIEW_TIMEOUT = 30
     yield tconf
-    tconf.MIN_TIMEOUT_CATCHUPS_DONE_DURING_VIEW_CHANGE = old_catchup_timeout
-    tconf.VIEW_CHANGE_TIMEOUT = old_view_change_timeout
+    tconf.NEW_VIEW_TIMEOUT = old_view_change_timeout
 
 
-@pytest.mark.skip(reason="INDY-2223: Temporary skipped to create build")
 def test_number_txns_in_catchup_and_vc_queue_valid(looper,
                                                    txnPoolNodeSet,
                                                    tconf,
@@ -34,13 +30,12 @@ def test_number_txns_in_catchup_and_vc_queue_valid(looper,
     master_node_index = txnPoolNodeSet.index(master_node)
     other_nodes = txnPoolNodeSet.copy()
     other_nodes.remove(master_node)
-    print(other_nodes)
     old_view = master_node.viewNo
     expected_view_no = old_view + 1
     disconnect_node_and_ensure_disconnected(looper, txnPoolNodeSet, master_node, stopNode=True)
     looper.removeProdable(master_node)
     looper.run(eventually(checkViewNoForNodes, other_nodes, expected_view_no, retryWait=1,
-                          timeout=tconf.VIEW_CHANGE_TIMEOUT))
+                          timeout=tconf.NEW_VIEW_TIMEOUT))
     sdk_pool_refresh(looper, sdk_pool_handle)
     sdk_send_random_and_check(looper, other_nodes, sdk_pool_handle, sdk_wallet_steward, num_txns)
     master_node = start_stopped_node(master_node, looper, tconf,
@@ -56,7 +51,6 @@ def test_number_txns_in_catchup_and_vc_queue_valid(looper,
         assert n._info_tool.info['Node_info']['View_change_status']['Last_complete_view_no'] == expected_view_no
 
 
-@pytest.mark.skip(reason="INDY-2223: Temporary skipped to create build")
 def test_instance_change_before_vc(looper,
                                    txnPoolNodeSet,
                                    tconf,
@@ -81,7 +75,7 @@ def test_instance_change_before_vc(looper,
         node.view_changer.on_master_degradation()
 
     looper.run(eventually(checkViewNoForNodes, txnPoolNodeSet, expected_view_no, retryWait=1,
-                          timeout=tconf.VIEW_CHANGE_TIMEOUT))
+                          timeout=tconf.NEW_VIEW_TIMEOUT))
     waitNodeDataEquality(looper, master_node, *txnPoolNodeSet)
 
     def is_inst_chngs_cleared():

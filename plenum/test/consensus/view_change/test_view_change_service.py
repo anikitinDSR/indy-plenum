@@ -4,7 +4,9 @@ import pytest
 from unittest.mock import Mock
 
 from plenum.common.messages.internal_messages import NeedViewChange, NewViewAccepted, ViewChangeStarted, \
-    NewViewCheckpointsApplied
+    NewViewCheckpointsApplied, StartViewChange
+from plenum.common.util import getMaxFailures
+from plenum.server.consensus.primary_selector import RoundRobinConstantNodesPrimariesSelector
 from plenum.server.consensus.view_change_storages import view_change_digest
 from plenum.common.messages.node_messages import ViewChange, ViewChangeAck, NewView, Checkpoint, InstanceChange
 from plenum.server.consensus.view_change_service import ViewChangeService
@@ -15,11 +17,18 @@ from plenum.test.consensus.helper import copy_shared_data, check_service_changed
     create_new_view, create_view_change, create_new_view_from_vc, create_view_change_acks, create_batches
 
 
+DEFAULT_STABLE_CHKP = 10
+
+
 @pytest.fixture
-def view_change_service_builder(consensus_data, timer, internal_bus, external_bus, stasher):
+def view_change_service_builder(consensus_data, timer, internal_bus, external_bus, stasher, initial_view_no, validators):
     def _service(name):
         data = consensus_data(name)
-        service = ViewChangeService(data, timer, internal_bus, external_bus, stasher)
+        digest = cp_digest(DEFAULT_STABLE_CHKP)
+        cp = Checkpoint(instId=0, viewNo=initial_view_no, seqNoStart=0, seqNoEnd=DEFAULT_STABLE_CHKP, digest=digest)
+        data.checkpoints.append(cp)
+        primaries_selector = RoundRobinConstantNodesPrimariesSelector(validators)
+        service = ViewChangeService(data, timer, internal_bus, external_bus, stasher, primaries_selector)
         return service
 
     return _service
@@ -48,7 +57,7 @@ def test_updates_shared_data_on_need_view_change(internal_bus, view_change_servi
     internal_bus.send(NeedViewChange())
 
     assert view_change_service._data.view_no == initial_view_no + 1
-    assert view_change_service._data.waiting_for_new_view == is_master
+    assert view_change_service._data.waiting_for_new_view
     assert view_change_service._data.primary_name != old_primary
     assert view_change_service._data.primaries != old_primaries
     new_data = copy_shared_data(view_change_service._data)
@@ -60,7 +69,7 @@ def test_updates_shared_data_on_need_view_change(internal_bus, view_change_servi
     internal_bus.send(NeedViewChange(view_no=initial_view_no + 3))
 
     assert view_change_service._data.view_no == initial_view_no + 3
-    assert view_change_service._data.waiting_for_new_view == is_master
+    assert view_change_service._data.waiting_for_new_view
     assert view_change_service._data.primary_name != old_primary
     assert view_change_service._data.primaries != old_primaries
     new_data = copy_shared_data(view_change_service._data)
@@ -111,7 +120,7 @@ def test_setup_prev_view_prepare_cert_on_vc_finished(internal_bus, view_change_s
     view_change_service._data.waiting_for_new_view = True
     view_change_service._data.prev_view_prepare_cert = 1
     new_view = create_new_view(initial_view_no=3, stable_cp=200)
-    view_change_service._new_view = new_view
+    view_change_service._data.new_view = new_view
     view_change_service._finish_view_change()
     assert view_change_service._data.prev_view_prepare_cert == new_view.batches[-1].pp_seq_no
     assert not view_change_service._data.waiting_for_new_view
@@ -249,6 +258,7 @@ def test_new_view_message_is_sent_by_primary_when_view_change_certificate_is_rea
     # receive quorum of ViewChanges and ViewChangeAcks
     non_primaries = [item for item in validators if item != primary_name]
     vc = create_view_change(initial_view_no)
+
     for vc_frm in non_primaries:
         external_bus.process_incoming(vc, generateName(vc_frm, service._data.inst_id))
         for ack, ack_frm in view_change_acks(vc, vc_frm, primary_name, len(validators) - 2):
@@ -607,6 +617,11 @@ def test_do_not_send_instance_change_on_timeout_when_multiple_view_change_finish
     # receive quorum of ViewChanges and ViewChangeAcks
     non_primaries = [item for item in validators if item != primary_name]
     vc = create_view_change(initial_view_no + 1)
+    service._data.checkpoints.append(Checkpoint(instId=0,
+                                                viewNo=initial_view_no + 1,
+                                                seqNoStart=0,
+                                                seqNoEnd=DEFAULT_STABLE_CHKP,
+                                                digest=cp_digest(DEFAULT_STABLE_CHKP)))
     for vc_frm in non_primaries:
         external_bus.process_incoming(vc, generateName(vc_frm, service._data.inst_id))
         for ack, ack_frm in create_view_change_acks(vc, vc_frm, non_primaries):
@@ -625,3 +640,33 @@ def test_do_not_send_instance_change_on_timeout_when_multiple_view_change_finish
     assert len(external_bus.sent_messages) == 1
     msg, dst = external_bus.sent_messages[0]
     assert isinstance(msg, NewView)
+
+
+def test_start_vc_by_quorum_of_vc_msgs(view_change_service_builder,
+                                       internal_bus,
+                                       external_bus,
+                                       validators,
+                                       is_master):
+    svc_queue = []
+    def svc_handler(msg: StartViewChange):
+        svc_queue.append(msg)
+    internal_bus.subscribe(StartViewChange, svc_handler)
+    # Quorum for ViewChange message is N-f
+    service = view_change_service_builder(validators[0])
+    proposed_view_no = 10
+    f = getMaxFailures(len(validators))
+    # Append N-f-1 ViewChange msgs to view_change_votes
+    for validator in validators[1:-f]:
+        msg = ViewChange(proposed_view_no, 0, [], [], [])
+        service.process_view_change_message(msg, validator)
+    # N-f-1 msgs is not enough for triggering view_change
+    assert not svc_queue
+    # Process the other one message
+    service.process_view_change_message(ViewChange(proposed_view_no, 0, [], [], []), validators[-1])
+    if is_master:
+        assert svc_queue
+        assert isinstance(svc_queue[0], StartViewChange)
+        assert svc_queue[0].view_no == proposed_view_no
+    else:
+        # ViewChange message isn't processed on backups
+        assert not svc_queue

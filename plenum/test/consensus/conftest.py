@@ -12,6 +12,7 @@ from plenum.common.stashing_router import StashingRouter
 from plenum.common.util import get_utc_epoch
 from plenum.server.consensus.consensus_shared_data import ConsensusSharedData
 from plenum.common.messages.node_messages import Checkpoint
+from plenum.server.consensus.primary_selector import RoundRobinConstantNodesPrimariesSelector
 from plenum.server.consensus.replica_service import ReplicaService
 from plenum.server.consensus.view_change_service import ViewChangeService
 from plenum.server.database_manager import DatabaseManager
@@ -45,16 +46,10 @@ def primary(validators):
 
 
 @pytest.fixture
-def initial_checkpoints(initial_view_no):
-    return [Checkpoint(instId=0, viewNo=initial_view_no, seqNoStart=0, seqNoEnd=0, digest=cp_digest(0))]
-
-
-@pytest.fixture
-def consensus_data(validators, primary, initial_view_no, initial_checkpoints, is_master):
+def consensus_data(validators, primary, initial_view_no, is_master):
     def _data(name):
         data = ConsensusSharedData(generateName(name, 0), validators, 0, is_master)
         data.view_no = initial_view_no
-        data.checkpoints.update(initial_checkpoints)
         return data
 
     return _data
@@ -66,9 +61,10 @@ def timer():
 
 
 @pytest.fixture
-def view_change_service(internal_bus, external_bus, timer, stasher):
+def view_change_service(internal_bus, external_bus, timer, stasher, validators):
     data = ConsensusSharedData("some_name", genNodeNames(4), 0)
-    return ViewChangeService(data, timer, internal_bus, external_bus, stasher)
+    primaries_selector = RoundRobinConstantNodesPrimariesSelector(validators)
+    return ViewChangeService(data, timer, internal_bus, external_bus, stasher, primaries_selector)
 
 
 @pytest.fixture
@@ -178,10 +174,14 @@ def replica_service(validators, primary, timer,
         node_names=validators,
         crypto_factory=create_default_bls_crypto_factory(),
         get_free_port=lambda: 8090)['txns']
-    return ReplicaService("Alpha:0",
-                          validators, primary,
-                          timer,
-                          internal_bus,
-                          external_bus,
-                          write_manager=create_test_write_req_manager("Alpha", genesis_txns),
-                          bls_bft_replica=FakeSomething(gc=lambda key: None))
+    write_manager = create_test_write_req_manager("Alpha", genesis_txns)
+
+    replica = ReplicaService("Alpha:0",
+                             validators, primary,
+                             timer,
+                             internal_bus,
+                             external_bus,
+                             write_manager=write_manager,
+                             bls_bft_replica=FakeSomething(gc=lambda key: None))
+
+    return replica

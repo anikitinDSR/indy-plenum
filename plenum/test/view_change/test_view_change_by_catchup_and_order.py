@@ -16,11 +16,11 @@ from stp_core.loop.eventually import eventually
 @pytest.fixture(scope="module")
 def tconf(tconf):
     with max_3pc_batch_limits(tconf, size=1) as tconf:
-        with view_change_timeout(tconf, vc_timeout=420, catchup_timeout=300) as tconf:
+        with view_change_timeout(tconf, vc_timeout=420) as tconf:
             yield tconf
 
 
-@pytest.mark.skip(reason="INDY-2223: Temporary skipped to create build")
+@pytest.mark.skip(reason="All commits before vc will be cleared and we don't order during vc")
 def test_view_change_by_order_stashed_on_all(txnPoolNodeSet, looper,
                                              sdk_pool_handle, sdk_wallet_steward):
     '''
@@ -61,7 +61,7 @@ def test_view_change_by_order_stashed_on_all(txnPoolNodeSet, looper,
     sdk_ensure_pool_functional(looper, txnPoolNodeSet, sdk_wallet_steward, sdk_pool_handle)
 
 
-@pytest.mark.skip(reason="INDY-2223: Temporary skipped to create build")
+@pytest.mark.skip(reason="There isn't catchup during the vc")
 def test_view_change_by_order_stashed_on_3_nodes_and_catchup_on_1_node(txnPoolNodeSet, looper,
                                                                        sdk_pool_handle, sdk_wallet_steward):
     '''

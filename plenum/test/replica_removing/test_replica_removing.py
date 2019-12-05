@@ -133,14 +133,13 @@ def test_removed_replica_restored_on_view_change(
     looper.run(checkNodesConnected(txnPoolNodeSet))
 
     waitForViewChange(looper, txnPoolNodeSet, expectedViewNo=1,
-                      customTimeout=2 * tconf.VIEW_CHANGE_TIMEOUT)
+                      customTimeout=2 * tconf.NEW_VIEW_TIMEOUT)
     ensureElectionsDone(looper=looper, nodes=txnPoolNodeSet)
 
     assert start_replicas_count == node.replicas.num_replicas
     ensure_all_nodes_have_same_data(looper, txnPoolNodeSet)
 
 
-@pytest.mark.skip(reason="INDY-2223: Temporary skipped to create build")
 def test_ordered_request_freed_on_replica_removal(looper,
                                                   txnPoolNodeSet,
                                                   sdk_pool_handle,
@@ -148,6 +147,7 @@ def test_ordered_request_freed_on_replica_removal(looper,
                                                   chkFreqPatched,
                                                   view_change):
     node = txnPoolNodeSet[0]
+    sdk_send_random_and_check(looper, txnPoolNodeSet, sdk_pool_handle, sdk_wallet_client, 2)
     old_stable_checkpoint = node.master_replica._consensus_data.stable_checkpoint
 
     with delay_rules(node.nodeIbStasher, cDelay(), msg_rep_delay(types_to_delay=[COMMIT])):
@@ -159,6 +159,7 @@ def test_ordered_request_freed_on_replica_removal(looper,
 
         assert node.requests[f_d].forwardedTo == node.replicas.num_replicas
     looper.run(eventually(check_for_nodes, txnPoolNodeSet, check_stable_checkpoint, old_stable_checkpoint))
+    ensure_all_nodes_have_same_data(looper, txnPoolNodeSet)
 
     # Send one more request to stabilize checkpoint
     sdk_send_random_and_check(looper, txnPoolNodeSet, sdk_pool_handle, sdk_wallet_client,

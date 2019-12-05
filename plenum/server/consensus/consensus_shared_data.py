@@ -59,6 +59,7 @@ class ConsensusSharedData:
         self.prepared = []  # type:  List[BatchID]
         self._validators = None
         self.quorums = None
+        self.new_view = None  # type: Optional[NewView]
         self.view_change_votes = ViewChangeVotesForView(Quorums(len(validators)))
         # a list of validator node names ordered by rank (historical order of adding)
         self.set_validators(validators)
@@ -71,7 +72,7 @@ class ConsensusSharedData:
         # 3 phase key for the last prepared certificate before view change
         # started, applicable only to master instance
         self.legacy_last_prepared_before_view_change = None
-        self.prev_view_prepare_cert = None
+        self.prev_view_prepare_cert = 0
 
         # Dictionary of sent PRE-PREPARE that are stored by primary replica
         # which it has broadcasted to all other non primary replicas

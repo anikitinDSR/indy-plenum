@@ -44,6 +44,7 @@ from plenum.common.types import f, OPERATION
 from plenum.common.util import getNoInstances, get_utc_epoch
 from plenum.common.config_helper import PNodeConfigHelper
 from plenum.common.request import Request
+from plenum.server.consensus.ordering_service import OrderingService
 from plenum.server.node import Node
 from plenum.server.replica import Replica
 from plenum.test import waits
@@ -316,8 +317,6 @@ def check_request_is_not_returned_to_nodes(txnPoolNodeSet, request):
 def checkPrePrepareReqSent(replica: TestReplica, req: Request):
     prePreparesSent = getAllArgs(replica._ordering_service,
                                  replica._ordering_service.send_pre_prepare)
-    expectedDigest = TestReplica.batchDigest([req])
-    assert expectedDigest in [p["ppReq"].digest for p in prePreparesSent]
     assert (req.digest,) in \
            [p["ppReq"].reqIdr for p in prePreparesSent]
 
@@ -371,7 +370,7 @@ def checkViewNoForNodes(nodes: Iterable[TestNode], expectedViewNo: int = None):
         logger.debug("{}'s view no is {}".format(node, node.master_replica.viewNo))
         viewNos.add(node.master_replica.viewNo)
     assert len(viewNos) == 1, 'Expected 1, but got {}. ' \
-                              'ViewNos: {}'.format(len(viewNos), [(n.name, node.master_replica.viewNo) for n in nodes])
+                              'ViewNos: {}'.format(len(viewNos), [(n.name, n.master_replica.viewNo) for n in nodes])
     vNo, = viewNos
     if expectedViewNo is not None:
         assert vNo >= expectedViewNo, \
@@ -519,7 +518,7 @@ def check_last_ordered_3pc_backup(node1, node2):
 
 def check_view_no(node1, node2):
     assert node1.master_replica.viewNo == node2.master_replica.viewNo, \
-        "{} != {}".format(node1.master_replica.viewNo, node2.master_replica.node2.viewNo)
+        "{} != {}".format(node1.master_replica.viewNo, node2.master_replica.viewNo)
 
 
 def check_last_ordered_3pc_on_all_replicas(nodes, last_ordered_3pc):
@@ -1147,25 +1146,17 @@ def perf_monitor_disabled(tconf):
 
 
 @contextmanager
-def view_change_timeout(tconf, vc_timeout, catchup_timeout=None, propose_timeout=None, ic_timeout=None):
-    old_catchup_timeout = tconf.MIN_TIMEOUT_CATCHUPS_DONE_DURING_VIEW_CHANGE
-    old_view_change_timeout = tconf.VIEW_CHANGE_TIMEOUT
+def view_change_timeout(tconf, vc_timeout, propose_timeout=None):
+    old_view_change_timeout = tconf.NEW_VIEW_TIMEOUT
     old_propose_timeout = tconf.INITIAL_PROPOSE_VIEW_CHANGE_TIMEOUT
     old_propagate_request_delay = tconf.PROPAGATE_REQUEST_DELAY
-    old_ic_timeout = tconf.INSTANCE_CHANGE_TIMEOUT
-    tconf.MIN_TIMEOUT_CATCHUPS_DONE_DURING_VIEW_CHANGE = \
-        0.6 * vc_timeout if catchup_timeout is None else catchup_timeout
-    tconf.VIEW_CHANGE_TIMEOUT = vc_timeout
+    tconf.NEW_VIEW_TIMEOUT = vc_timeout
     tconf.INITIAL_PROPOSE_VIEW_CHANGE_TIMEOUT = vc_timeout if propose_timeout is None else propose_timeout
     tconf.PROPAGATE_REQUEST_DELAY = 0
-    if ic_timeout is not None:
-        tconf.INSTANCE_CHANGE_TIMEOUT = ic_timeout
     yield tconf
-    tconf.MIN_TIMEOUT_CATCHUPS_DONE_DURING_VIEW_CHANGE = old_catchup_timeout
-    tconf.VIEW_CHANGE_TIMEOUT = old_view_change_timeout
+    tconf.NEW_VIEW_TIMEOUT = old_view_change_timeout
     tconf.INITIAL_PROPOSE_VIEW_CHANGE_TIMEOUT = old_propose_timeout
     tconf.PROPAGATE_REQUEST_DELAY = old_propagate_request_delay
-    tconf.INSTANCE_CHANGE_TIMEOUT = old_ic_timeout
 
 
 @contextmanager
@@ -1226,12 +1217,14 @@ def create_pre_prepare_params(state_root,
                               audit_txn_root=None,
                               reqs=None,
                               bls_multi_sigs=None):
-    digest = Replica.batchDigest(reqs) if reqs is not None else random_string(32)
+    if timestamp is None:
+        timestamp = get_utc_epoch()
     req_idrs = [req.key for req in reqs] if reqs is not None else [random_string(32)]
+    digest = OrderingService.generate_pp_digest(req_idrs, view_no, timestamp)
     params = [inst_id,
               view_no,
               pp_seq_no,
-              timestamp or get_utc_epoch(),
+              timestamp,
               req_idrs,
               init_discarded(0),
               digest,
@@ -1243,11 +1236,13 @@ def create_pre_prepare_params(state_root,
               pool_state_root or generate_state_root(),
               audit_txn_root or generate_state_root()]
     if bls_multi_sig:
-        params.append(bls_multi_sig.as_list())
-    if bls_multi_sigs is not None:
-        params.append([sig.as_list() for sig in bls_multi_sigs])
-    elif bls_multi_sig:
+        # Pass None for backward compatibility
+        params.append(None)
         params.append([bls_multi_sig.as_list()])
+    elif bls_multi_sigs is not None:
+        # Pass None for backward compatibility
+        params.append(None)
+        params.append([sig.as_list() for sig in bls_multi_sigs])
     return params
 
 
@@ -1274,14 +1269,17 @@ def create_commit_no_bls_sig(req_key, inst_id=0):
 def create_commit_with_bls_sig(req_key, bls_sig):
     view_no, pp_seq_no = req_key
     params = create_commit_params(view_no, pp_seq_no)
-    params.append(bls_sig)
+    #  Use ' ' as BLS_SIG for backward-compatibility as BLS_SIG in COMMIT is optional but not Nullable
+    params.append(' ')
+    params.append({DOMAIN_LEDGER_ID: bls_sig})
     return Commit(*params)
 
 
 def create_commit_with_bls_sigs(req_key, bls_sig, lid):
     view_no, pp_seq_no = req_key
     params = create_commit_params(view_no, pp_seq_no)
-    params.append(bls_sig)
+    #  Use ' ' as BLS_SIG for backward-compatibility as BLS_SIG in COMMIT is optional but not Nullable
+    params.append(' ')
     params.append({str(lid): bls_sig})
     return Commit(*params)
 

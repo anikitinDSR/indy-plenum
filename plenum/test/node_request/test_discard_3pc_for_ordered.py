@@ -13,16 +13,11 @@ from plenum.test.helper import sdk_send_batches_of_random_and_check
 @pytest.fixture(scope="module")
 def tconf(tconf):
     oldMax3PCBatchSize = tconf.Max3PCBatchSize
-    oldMax3PCBatchWait = tconf.Max3PCBatchWait
     tconf.Max3PCBatchSize = 6
-    tconf.Max3PCBatchWait = 2
     yield tconf
-
     tconf.Max3PCBatchSize = oldMax3PCBatchSize
-    tconf.Max3PCBatchWait = oldMax3PCBatchWait
 
 
-@pytest.mark.skip(reason="INDY-2223: Temporary skipped to create build")
 def test_discard_3PC_messages_for_already_ordered(looper, txnPoolNodeSet,
                                                   sdk_wallet_client, sdk_pool_handle):
     """
